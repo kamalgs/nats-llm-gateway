@@ -478,6 +478,12 @@ subject.
 - [ ] Python SDK
 - [ ] Additional provider adapters (Google Vertex, vLLM)
 
+### M6 — Client-Side Offloading
+- [ ] Client-side token counting (`js-tiktoken` WASM) — budget enforcement and prompt truncation before requests hit NATS
+- [ ] Prompt hash deduplication — SDK hashes prompt content, gateway deduplicates identical in-flight requests to avoid redundant inference
+- [ ] Client-side RAG assembly — SDK helpers for local embedding (via `transformers.js`) + retrieval, sending only the final assembled prompt
+- [ ] Prefix caching hints — SDK signals reusable prompt prefixes so inference servers can skip KV cache recomputation
+
 ---
 
 ## 7. Open Questions
