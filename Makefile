@@ -35,13 +35,13 @@ test-v:
 
 # Demo (multi-provider with mock LLM)
 demo-up:
-	docker compose -f docker-compose.demo.yaml up --build -d
+	docker compose -f demo/docker-compose.yaml up --build -d
 
 demo-down:
-	docker compose -f docker-compose.demo.yaml down
+	docker compose -f demo/docker-compose.yaml down
 
 demo-test:
-	bash examples/demo.sh
+	bash demo/demo.sh
 
 clean:
 	rm -f gateway proxy provider mockllm

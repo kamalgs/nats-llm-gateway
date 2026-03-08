@@ -4,4 +4,4 @@ services:
     ports:
       - "4222:4222"   # client connections
       - "8222:8222"   # monitoring / healthcheck
-    command: ["--js"]  # JetStream enabled (used for KV in later milestones)
+    command: ["-m", "8222"]

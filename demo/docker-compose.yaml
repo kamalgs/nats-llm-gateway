@@ -8,7 +8,7 @@ services:
       - "7422:7422"
       - "8222:8222"
     volumes:
-      - ./deploy/nats-hub.conf:/etc/nats/nats.conf
+      - ./nats-hub.conf:/etc/nats/nats.conf
     command: ["--config", "/etc/nats/nats.conf"]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
@@ -22,7 +22,7 @@ services:
       - "4225:4225"
       - "8225:8225"
     volumes:
-      - ./deploy/nats-leaf-client.conf:/etc/nats/nats.conf
+      - ./nats-leaf-client.conf:/etc/nats/nats.conf
     command: ["--config", "/etc/nats/nats.conf"]
     depends_on:
       nats-hub:
@@ -34,7 +34,7 @@ services:
       - "4223:4223"
       - "8223:8223"
     volumes:
-      - ./deploy/nats-leaf-cloud.conf:/etc/nats/nats.conf
+      - ./nats-leaf-cloud.conf:/etc/nats/nats.conf
     command: ["--config", "/etc/nats/nats.conf"]
     depends_on:
       nats-hub:
@@ -46,7 +46,7 @@ services:
       - "4224:4224"
       - "8224:8224"
     volumes:
-      - ./deploy/nats-leaf-edge.conf:/etc/nats/nats.conf
+      - ./nats-leaf-edge.conf:/etc/nats/nats.conf
     command: ["--config", "/etc/nats/nats.conf"]
     depends_on:
       nats-hub:
@@ -55,7 +55,9 @@ services:
   # === Application Services ===
 
   mockllm:
-    build: .
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
     entrypoint: ["mockllm"]
     environment:
       MOCKLLM_ADDR: ":9999"
@@ -63,10 +65,12 @@ services:
       - "9999:9999"
 
   gateway:
-    build: .
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
     entrypoint: ["gateway"]
     environment:
-      GATEWAY_CONFIG: /etc/infermesh/configs/demo.yaml
+      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
       NATS_URL: "nats://nats-hub:4222"
       OPENAI_BASE_URL: "http://mockllm:9999/v1"
       ANTHROPIC_BASE_URL: "http://mockllm:9999"
@@ -80,7 +84,9 @@ services:
         condition: service_started
 
   proxy:
-    build: .
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
     entrypoint: ["proxy"]
     environment:
       NATS_URL: "nats://nats-leaf-client:4225"
@@ -94,11 +100,13 @@ services:
         condition: service_started
 
   provider-openai:
-    build: .
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
     entrypoint: ["provider"]
     environment:
       PROVIDER_NAME: openai
-      GATEWAY_CONFIG: /etc/infermesh/configs/demo.yaml
+      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
       NATS_URL: "nats://nats-leaf-cloud:4223"
       OPENAI_BASE_URL: "http://mockllm:9999/v1"
       ANTHROPIC_BASE_URL: "http://mockllm:9999"
@@ -112,11 +120,13 @@ services:
         condition: service_started
 
   provider-anthropic:
-    build: .
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
     entrypoint: ["provider"]
     environment:
       PROVIDER_NAME: anthropic
-      GATEWAY_CONFIG: /etc/infermesh/configs/demo.yaml
+      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
       NATS_URL: "nats://nats-leaf-cloud:4223"
       OPENAI_BASE_URL: "http://mockllm:9999/v1"
       ANTHROPIC_BASE_URL: "http://mockllm:9999"
@@ -130,11 +140,13 @@ services:
         condition: service_started
 
   provider-ollama:
-    build: .
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
     entrypoint: ["provider"]
     environment:
       PROVIDER_NAME: ollama
-      GATEWAY_CONFIG: /etc/infermesh/configs/demo.yaml
+      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
       NATS_URL: "nats://nats-leaf-edge:4224"
       OPENAI_BASE_URL: "http://mockllm:9999/v1"
       ANTHROPIC_BASE_URL: "http://mockllm:9999"

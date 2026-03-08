@@ -14,6 +14,6 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /bin/gateway /bin/proxy /bin/provider /bin/mockllm /usr/local/bin/
-COPY configs/ /etc/infermesh/configs/
+COPY demo/demo.yaml /etc/infermesh/demo.yaml
 
 ENTRYPOINT ["gateway"]
