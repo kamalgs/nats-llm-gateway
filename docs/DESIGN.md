@@ -14,29 +14,23 @@ HTTP layer — it communicates purely over NATS. Clients integrate via two paths
    pub/sub access.
 
 ```
-                                NATS Server
-                             (TCP + WebSocket)
-                                    │
-        ┌───────────────────────────┼───────────────────────────┐
-        │                           │                           │
- ┌──────┴──────┐            ┌──────┴──────┐            ┌──────┴──────┐
- │  HTTP Proxy │            │   Gateway   │            │   Client    │
- │ (any client │            │   Service   │            │  (JS SDK)   │
- │  via baseURL│────NATS───►│   (Go)      │            │  Node/Bun/  │
- │  change)    │            │             │◄───NATS────│  Browser    │
- └──────┬──────┘            └──────┬──────┘            └─────────────┘
-        ▲                          │
-  HTTP  │               ┌──────────┼──────────┐
-  POST  │               ▼          ▼          ▼
- /v1/.. │        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │        │ Provider │ │ Provider │ │ Provider │
- ┌──────┴──────┐ │ OpenAI   │ │Anthropic │ │ Ollama   │
- │ Existing app│ └──────────┘ └──────────┘ └──────────┘
- │ (OpenAI SDK │
- │  LangChain  │
- │  fetch()    │
- │  curl)      │
- └─────────────┘
+  CLIENT EDGE (HTTP)              NATS BACKBONE                 INFERENCE
+  ═══════════════              ═══════════════════         ═══════════════════
+
+ ┌─────────────┐                                         ┌─────────────────┐
+ │ Existing app│               ┌─────────────┐           │  HTTP Adapter   │
+ │ (OpenAI SDK │──HTTP──►┌─────┤   Gateway   ├──NATS───► │  (NATS→HTTP)    │──► OpenAI API
+ │  LangChain  │         │     │   Service   │           │                 │──► Anthropic
+ │  curl)      │    ┌────┴──┐  │  (routing,  │           └─────────────────┘
+ └─────────────┘    │ HTTP  │  │   auth,     │
+                    │ Proxy ├──┤   rate      │           ┌─────────────────┐
+ ┌─────────────┐    └───────┘  │   limit)   ├──NATS───► │ NATS-Native     │
+ │  JS SDK     │               │             │           │ Model Server    │
+ │  (Node/Bun/ │──NATS────────►│             │           │ (vLLM/Ollama    │
+ │   Browser)  │               └─────────────┘           │  on local GPU)  │
+ └─────────────┘                                         └─────────────────┘
+                     │◄──── NATS everywhere ────►│
+                     HTTP only at the edges
 ```
 
 ### Two Integration Tiers
@@ -470,7 +464,90 @@ providers:
 - This enables application-level identity and policy enforcement on top of
   NATS transport-level auth.
 
-### 4.9 Rate Limiting
+### 4.10 NATS-Native Inference (HTTP at the Edge Only)
+
+The same NATS subject contract (`llm.provider.<name>`) works for both
+cloud API adapters (which bridge NATS→HTTP outbound) and self-hosted
+inference servers (which subscribe to NATS directly). This means HTTP
+can be eliminated from the entire path except at the client edge.
+
+#### Deployment Topologies
+
+**Cloud APIs (HTTP adapter bridges to external API):**
+```
+Client ──► HTTP Proxy ──► NATS ──► Gateway ──► NATS ──► HTTP Adapter ──HTTP──► OpenAI API
+           (edge)                                       (outbound bridge)
+           1 HTTP hop                                   1 HTTP hop
+```
+
+**Self-hosted models (zero internal HTTP):**
+```
+Client ──► HTTP Proxy ──► NATS ──► Gateway ──► NATS ──► Model Server (vLLM/Ollama)
+           (edge)                                       (NATS subscriber, local GPU)
+           1 HTTP hop                                   0 HTTP hops
+```
+
+**SDK client + self-hosted model (zero HTTP anywhere):**
+```
+Client (JS SDK) ──► NATS ──► Gateway ──► NATS ──► Model Server
+Browser (NATS WS) ──► NATS ──► Gateway ──► NATS ──► Model Server
+                     0 HTTP hops end-to-end
+```
+
+#### NATS-Native Model Server
+
+A NATS-native model server is a thin wrapper around an inference engine
+(vLLM, Ollama, llama.cpp, TGI) that subscribes to `llm.provider.<name>`
+and runs inference directly — no HTTP server in the inference process.
+
+```
+┌──────────────────────────────────────┐
+│         NATS-Native Model Server     │
+│                                      │
+│  NATS subscriber                     │
+│  subject: llm.provider.local-llama   │
+│  queue group: inference              │
+│                                      │
+│  ┌──────────────────────────────┐    │
+│  │  Inference Engine            │    │
+│  │  (vLLM / Ollama / llama.cpp) │    │
+│  │  GPU 0..N                    │    │
+│  └──────────────────────────────┘    │
+└──────────────────────────────────────┘
+```
+
+The model server implements the same `ProviderRequest` → `ChatResponse`
+wire format. The gateway routes to it identically — it doesn't know or
+care whether the subscriber is an HTTP adapter or a bare-metal GPU box.
+
+**Scaling:** Multiple model server instances subscribe to the same
+subject with a shared queue group. NATS distributes requests across
+GPUs automatically. Adding a GPU node = starting a new subscriber.
+No load balancer, no service mesh, no configuration change.
+
+```yaml
+# Config: same provider syntax, different model names
+models:
+  "gpt-4o":
+    provider: openai           # → HTTP adapter → OpenAI API
+  "llama3-local":
+    provider: local-llama      # → NATS-native model server (GPU)
+  "codellama":
+    provider: local-llama      # → same GPU cluster, different model
+```
+
+#### Benefits of NATS-Native Inference
+
+| Benefit | Detail |
+|---|---|
+| **Zero internal HTTP** | No HTTP parse/serialize between gateway and inference |
+| **Automatic GPU load balancing** | NATS queue groups distribute across GPU nodes |
+| **Elastic scaling** | Add/remove GPU nodes by starting/stopping subscribers |
+| **Mixed deployments** | Some models on local GPUs, some on cloud APIs — same gateway config |
+| **Edge inference** | Run models close to users, connect via NATS leaf nodes |
+| **Multi-cluster** | NATS super-clusters span data centers; inference can run anywhere |
+
+### 4.11 Rate Limiting
 
 Sliding window algorithm enforced at the gateway service before routing:
 
@@ -563,6 +640,16 @@ subject.
 - [ ] Client-side RAG assembly — SDK helpers for local embedding (via `transformers.js`) + retrieval, sending only the final assembled prompt
 - [ ] Prefix caching hints — SDK signals reusable prompt prefixes so inference servers can skip KV cache recomputation
 
+### M7 — NATS-Native Inference
+- [ ] Reference NATS-native model server wrapping Ollama (Go binary, subscribes to `llm.provider.<name>`)
+- [ ] NATS-native model server wrapping vLLM (Python process with NATS subscriber)
+- [ ] Multi-GPU load balancing via NATS queue groups (extractly zero config — just start more subscribers)
+- [ ] Streaming inference: model server publishes tokens directly to client inbox subject
+- [ ] Health/readiness signaling: model servers publish GPU utilization and queue depth to `llm.provider.<name>.status`
+- [ ] NATS leaf node configuration for edge inference (model server in remote location, connected via leaf node)
+- [ ] Benchmark: NATS-native inference vs HTTP-based Ollama/vLLM (measure eliminated HTTP overhead)
+- [ ] Mixed deployment example: docker-compose with local Ollama (NATS-native) + cloud OpenAI (HTTP adapter)
+
 ---
 
 ## 7. Open Questions
@@ -591,3 +678,16 @@ subject.
    natively. For browsers, `nats.ws` provides WebSocket transport. The SDK
    should accept either a pre-connected NATS connection or auto-detect the
    runtime and pick the right transport.
+
+6. **NATS-native inference: wrapper approach?**
+   For Ollama, a Go wrapper that imports the Ollama library directly (no HTTP)
+   is cleanest. For vLLM, a Python NATS subscriber calling vLLM's Python API
+   avoids the HTTP server entirely. For llama.cpp, a CGo wrapper or a
+   subprocess with stdin/stdout piping. Each has trade-offs in complexity
+   vs. performance gain.
+
+7. **GPU health and backpressure?**
+   NATS queue groups distribute evenly, but GPUs have variable load. Model
+   servers could publish utilization metrics to a status subject, and the
+   gateway could use weighted routing. Alternatively, NATS JetStream with
+   ack-wait provides natural backpressure — slow consumers get fewer messages.
