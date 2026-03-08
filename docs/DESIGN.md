@@ -2,38 +2,52 @@
 
 ## 1. Overview
 
-NATS LLM Gateway is a **NATS-native** LLM gateway. There is no HTTP layer in
-the gateway itself — clients connect directly to NATS (TCP or WebSocket) and
-interact with LLM providers through NATS request/reply and streaming subjects.
+NATS LLM Gateway is a **NATS-native** LLM gateway. The core gateway has no
+HTTP layer — it communicates purely over NATS. Clients integrate via two paths:
 
-A **JavaScript/TypeScript SDK** (`nats-llm-client`) provides an
-OpenAI-compatible programmatic interface over NATS. The SDK is designed as a
-**drop-in replacement for the OpenAI JS SDK** — same method signatures, same
-types, different transport. Works in Node.js, Deno, Bun, and browsers (via
-NATS WebSocket).
+1. **HTTP Proxy** (zero migration effort) — a thin `POST /v1/chat/completions`
+   endpoint that translates HTTP to NATS. Existing apps just change `baseURL`.
+   Works with any OpenAI SDK, LangChain, Vercel AI SDK, or raw `fetch()`.
 
-A client-side HTTP proxy can be added later for legacy HTTP clients.
+2. **NATS SDK** (full benefits) — a JS/TS SDK that mirrors the `openai` npm
+   package API over NATS directly. Lower latency, native streaming, direct
+   pub/sub access.
 
 ```
-                          NATS Server
-                       (TCP + WebSocket)
-                              │
-          ┌───────────────────┼───────────────────┐
-          │                   │                   │
-   ┌──────┴──────┐    ┌──────┴──────┐    ┌──────┴──────┐
-   │   Client    │    │   Gateway   │    │   Client    │
-   │  (JS SDK)   │    │   Service   │    │  (Browser   │
-   │  Node/Bun   │    │   (Go)     │    │   via WS)   │
-   └─────────────┘    └──────┬──────┘    └─────────────┘
-                             │
-          ┌──────────────────┼──────────────────┐
-          ▼                  ▼                  ▼
-   ┌────────────┐    ┌────────────┐     ┌────────────┐
-   │  Provider  │    │  Provider  │     │  Provider  │
-   │  Adapter:  │    │  Adapter:  │     │  Adapter:  │
-   │  OpenAI    │    │  Anthropic │     │  Ollama    │
-   └────────────┘    └────────────┘     └────────────┘
+                                NATS Server
+                             (TCP + WebSocket)
+                                    │
+        ┌───────────────────────────┼───────────────────────────┐
+        │                           │                           │
+ ┌──────┴──────┐            ┌──────┴──────┐            ┌──────┴──────┐
+ │  HTTP Proxy │            │   Gateway   │            │   Client    │
+ │ (any client │            │   Service   │            │  (JS SDK)   │
+ │  via baseURL│────NATS───►│   (Go)      │            │  Node/Bun/  │
+ │  change)    │            │             │◄───NATS────│  Browser    │
+ └──────┬──────┘            └──────┬──────┘            └─────────────┘
+        ▲                          │
+  HTTP  │               ┌──────────┼──────────┐
+  POST  │               ▼          ▼          ▼
+ /v1/.. │        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │        │ Provider │ │ Provider │ │ Provider │
+ ┌──────┴──────┐ │ OpenAI   │ │Anthropic │ │ Ollama   │
+ │ Existing app│ └──────────┘ └──────────┘ └──────────┘
+ │ (OpenAI SDK │
+ │  LangChain  │
+ │  fetch()    │
+ │  curl)      │
+ └─────────────┘
 ```
+
+### Two Integration Tiers
+
+| | HTTP Proxy | NATS SDK |
+|---|---|---|
+| **Migration effort** | Change `baseURL` — zero code changes | Swap constructor — 1-2 lines |
+| **Works with** | Any language, any framework, curl | JS/TS (Node, Deno, Bun, browser) |
+| **Streaming** | SSE (`text/event-stream`) | Async iterables over NATS |
+| **Latency overhead** | HTTP parse + NATS hop | NATS only |
+| **Best for** | Existing apps, frameworks (LangChain, Vercel AI SDK) | New apps, performance-sensitive, advanced NATS patterns |
 
 ### Why NATS-native (no HTTP in the gateway)?
 
@@ -50,17 +64,17 @@ A client-side HTTP proxy can be added later for legacy HTTP clients.
 
 ## 2. Goals
 
-1. **NATS-native protocol** — clients and gateway communicate purely over NATS (TCP or WebSocket).
-2. **JavaScript SDK with OpenAI-compatible interface** — mirrors the `openai` npm package API. Applications using `new OpenAI()` can switch to `new NATSLLMClient()` with minimal code changes.
-3. **Multi-runtime** — SDK works in Node.js, Deno, Bun, and browsers.
-4. **Multi-provider routing** — route to OpenAI, Anthropic, Ollama, vLLM, or any provider via pluggable adapters.
-5. **Model aliasing & mapping** — expose virtual model names that map to real provider:model pairs.
-6. **Streaming first** — token-by-token streaming over NATS subjects, exposed as async iterables.
-7. **Rate limiting** — per-user, per-model, and global rate limits enforced at the gateway service.
-8. **Authentication** — leverage NATS native auth (NKeys, JWTs, tokens) + gateway-level API key validation.
-9. **Observability** — structured logging, Prometheus metrics, OpenTelemetry traces.
-10. **Future SDKs** — Go, Python SDKs can be added later following the same wire protocol.
-11. **Future HTTP proxy** — a thin client-side HTTP→NATS proxy can be layered on later.
+1. **Zero-effort adoption** — HTTP proxy accepts `POST /v1/chat/completions`; existing apps just change `baseURL`.
+2. **NATS-native protocol** — core gateway communicates purely over NATS (TCP or WebSocket).
+3. **JavaScript SDK with OpenAI-compatible interface** — mirrors the `openai` npm package API for apps that want direct NATS benefits.
+4. **Multi-runtime** — SDK works in Node.js, Deno, Bun, and browsers.
+5. **Multi-provider routing** — route to OpenAI, Anthropic, Ollama, vLLM, or any provider via pluggable adapters.
+6. **Model aliasing & mapping** — expose virtual model names that map to real provider:model pairs.
+7. **Streaming first** — SSE for HTTP clients, async iterables over NATS for SDK clients.
+8. **Rate limiting** — per-user, per-model, and global rate limits enforced at the gateway service.
+9. **Authentication** — leverage NATS native auth (NKeys, JWTs, tokens) + gateway-level API key validation.
+10. **Observability** — structured logging, Prometheus metrics, OpenTelemetry traces.
+11. **Future SDKs** — Go, Python SDKs can be added later following the same wire protocol.
 
 ---
 
@@ -70,23 +84,24 @@ A client-side HTTP proxy can be added later for legacy HTTP clients.
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| FR-1 | JS SDK: `chat.completions.create(req)` with OpenAI-compatible request/response types | P0 |
-| FR-2 | JS SDK: streaming via async iterable (`for await...of`) when `stream: true` | P0 |
-| FR-3 | JS SDK: works in Node.js (TCP) and browsers (WebSocket) | P0 |
-| FR-4 | Gateway service: accept requests on NATS subjects, route by model | P0 |
-| FR-5 | Provider adapters for OpenAI, Anthropic, Ollama | P0 |
-| FR-6 | Model aliasing — map virtual model names to provider:model pairs | P1 |
-| FR-7 | Authentication via NATS native auth + gateway-level API key check | P0 |
-| FR-8 | Per-user and per-model rate limiting at the gateway | P0 |
-| FR-9 | Return OpenAI-compatible response and error structures | P0 |
-| FR-10 | List available models via `models.list()` | P1 |
-| FR-11 | Request/response logging with redaction of sensitive fields | P1 |
-| FR-12 | Graceful shutdown with in-flight request draining | P1 |
-| FR-13 | Tool/function calling pass-through | P2 |
-| FR-14 | Provider failover — retry on a secondary provider if primary fails | P2 |
-| FR-15 | Client-side HTTP→NATS proxy | P2 |
-| FR-16 | Go SDK | P2 |
-| FR-17 | Python SDK | P2 |
+| FR-1 | HTTP proxy: `POST /v1/chat/completions` → NATS (drop-in for any OpenAI client) | P0 |
+| FR-2 | HTTP proxy: SSE streaming support (`stream: true`) | P0 |
+| FR-3 | HTTP proxy: `GET /v1/models` endpoint | P0 |
+| FR-4 | JS SDK: `chat.completions.create(req)` with OpenAI-compatible request/response types | P0 |
+| FR-5 | JS SDK: streaming via async iterable (`for await...of`) when `stream: true` | P0 |
+| FR-6 | JS SDK: works in Node.js (TCP) and browsers (WebSocket) | P1 |
+| FR-7 | Gateway service: accept requests on NATS subjects, route by model | P0 |
+| FR-8 | Provider adapters for OpenAI, Anthropic, Ollama | P0 |
+| FR-9 | Model aliasing — map virtual model names to provider:model pairs | P1 |
+| FR-10 | Authentication via NATS native auth + gateway-level API key check | P0 |
+| FR-11 | Per-user and per-model rate limiting at the gateway | P0 |
+| FR-12 | Return OpenAI-compatible response and error structures | P0 |
+| FR-13 | Request/response logging with redaction of sensitive fields | P1 |
+| FR-14 | Graceful shutdown with in-flight request draining | P1 |
+| FR-15 | Tool/function calling pass-through | P2 |
+| FR-16 | Provider failover — retry on a secondary provider if primary fails | P2 |
+| FR-17 | Go SDK | P2 |
+| FR-18 | Python SDK | P2 |
 
 ### 3.2 Non-Functional Requirements
 
@@ -109,7 +124,7 @@ A client-side HTTP proxy can be added later for legacy HTTP clients.
 ```
 nats-llm-gateway/
 ├── sdk/
-│   └── js/                        # JavaScript/TypeScript SDK
+│   └── js/                        # JavaScript/TypeScript SDK (nats-llm-client)
 │       ├── src/
 │       │   ├── index.ts           # Public API exports
 │       │   ├── client.ts          # NATSLLMClient — main entry point
@@ -121,7 +136,8 @@ nats-llm-gateway/
 │       ├── package.json
 │       └── tsconfig.json
 ├── cmd/
-│   └── gateway/                   # Gateway service binary (Go)
+│   ├── gateway/                   # Gateway service binary (Go)
+│   └── proxy/                     # HTTP→NATS proxy binary (Go)
 ├── internal/                      # Gateway internals (Go)
 │   ├── auth/
 │   ├── ratelimit/
@@ -131,6 +147,7 @@ nats-llm-gateway/
 │   │   ├── openai/
 │   │   ├── anthropic/
 │   │   └── ollama/
+│   ├── proxy/                     # HTTP proxy: OpenAI-compat HTTP ↔ NATS translation
 │   ├── config/
 │   └── middleware/
 ├── configs/
@@ -142,7 +159,63 @@ nats-llm-gateway/
 └── go.sum
 ```
 
-### 4.2 SDK — JavaScript Client Interface
+### 4.2 HTTP Proxy — Zero-Migration Path
+
+The HTTP proxy is a thin Go binary that translates OpenAI-compatible HTTP
+requests to NATS messages and back. It connects to NATS as a client and
+publishes to the same subjects the JS SDK uses.
+
+```
+Existing App                    HTTP Proxy                  NATS
+    │                              │                          │
+    │  POST /v1/chat/completions   │                          │
+    │  Authorization: Bearer sk-.. │                          │
+    │  {model, messages}           │                          │
+    │ ────────────────────────────►│                          │
+    │                              │  NATS Request            │
+    │                              │  llm.chat.complete       │
+    │                              │ ────────────────────────►│──► Gateway
+    │                              │                          │
+    │                              │◄─────────────────────────│◄── Reply
+    │   HTTP 200 JSON              │                          │
+    │◄─────────────────────────────│                          │
+    │                              │                          │
+    │  POST (stream: true)         │                          │
+    │ ────────────────────────────►│                          │
+    │                              │  NATS sub + Request      │
+    │                              │  llm.chat.stream         │
+    │                              │ ────────────────────────►│──► Gateway
+    │   SSE: data: {chunk}         │                          │
+    │◄══════════════════════════════◄══════════════════════════◄══ Chunks
+    │   SSE: data: [DONE]          │                          │
+    │◄══════════════════════════════│                          │
+```
+
+**Usage — existing apps change one line:**
+
+```typescript
+// Before
+const client = new OpenAI({ apiKey: 'sk-...' });
+
+// After — point to the proxy, everything else unchanged
+const client = new OpenAI({
+  baseURL: 'http://localhost:8080/v1',
+  apiKey: 'sk-...',
+});
+```
+
+```bash
+# Works with curl, Python openai SDK, LangChain, Vercel AI SDK, anything
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-my-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+The proxy can run as a sidecar, a standalone service, or be embedded in the
+gateway binary itself (single binary mode).
+
+### 4.3 SDK — JavaScript Client Interface
 
 The SDK mirrors the OpenAI JS SDK (`openai` npm package) interface:
 
@@ -197,7 +270,7 @@ const resp = await client.chat.completions.create({
 });
 ```
 
-### 4.3 Request Flow
+### 4.4 Request Flow
 
 #### Non-Streaming (NATS Request/Reply)
 
@@ -258,7 +331,7 @@ client's inbox subject — the gateway service doesn't sit in the data path for
 every token. This minimizes latency. The gateway only handles the initial
 request (auth, rate limit, routing).
 
-### 4.4 NATS Subject Design
+### 4.5 NATS Subject Design
 
 | Subject | Purpose | Pattern |
 |---|---|---|
@@ -274,7 +347,7 @@ request (auth, rate limit, routing).
   so multiple replicas share load.
 - Streaming chunks flow directly from adapter to client inbox — no gateway hop.
 
-### 4.5 Wire Format
+### 4.6 Wire Format
 
 All messages are JSON-encoded. The wire types match OpenAI's API schema:
 
@@ -336,7 +409,7 @@ for gateway-level auth (complementing NATS-level auth).
 }
 ```
 
-### 4.6 Configuration
+### 4.7 Configuration
 
 ```yaml
 # configs/gateway.yaml
@@ -382,7 +455,7 @@ providers:
     base_url: "http://localhost:11434"
 ```
 
-### 4.7 Authentication (Two Layers)
+### 4.8 Authentication (Two Layers)
 
 **Layer 1 — NATS native auth:**
 - Clients authenticate to the NATS server using tokens, NKeys, or JWTs.
@@ -397,7 +470,7 @@ providers:
 - This enables application-level identity and policy enforcement on top of
   NATS transport-level auth.
 
-### 4.8 Rate Limiting
+### 4.9 Rate Limiting
 
 Sliding window algorithm enforced at the gateway service before routing:
 
@@ -440,43 +513,49 @@ subject.
 
 ## 6. Milestones
 
-### M1 — Walking Skeleton
+### M1 — Walking Skeleton (HTTP Proxy + Gateway + One Provider)
+- [ ] HTTP proxy: `POST /v1/chat/completions` → NATS translation (non-streaming)
+- [ ] HTTP proxy: `GET /v1/models` endpoint
+- [ ] Gateway service: subscribe to `llm.chat.complete`, route to provider
+- [ ] OpenAI provider adapter (pass-through)
 - [ ] JS SDK: `NATSLLMClient` with NATS connection (Node.js TCP)
 - [ ] JS SDK: `chat.completions.create()` — non-streaming request/reply
 - [ ] JS SDK: OpenAI-compatible types (TypeScript)
-- [ ] Gateway service: subscribe to `llm.chat.complete`, route to provider
-- [ ] OpenAI provider adapter (pass-through)
+- [ ] End-to-end: existing OpenAI SDK client → HTTP proxy → NATS → Gateway → OpenAI → response
 - [ ] End-to-end: JS SDK → NATS → Gateway → OpenAI → response
+- [ ] docker-compose: NATS server + gateway + proxy for local dev
 
 ### M2 — Streaming & Multi-Provider
+- [ ] HTTP proxy: SSE streaming (`stream: true` → `text/event-stream`)
 - [ ] JS SDK: streaming via async iterable (`for await...of`)
-- [ ] JS SDK: browser support via `nats.ws` (WebSocket)
 - [ ] Gateway + adapter streaming via NATS pub/sub
 - [ ] Anthropic provider adapter (Messages API → OpenAI format translation)
 - [ ] Ollama provider adapter
 - [ ] Model aliasing and routing
 
 ### M3 — Auth & Rate Limiting
-- [ ] Gateway API key authentication
+- [ ] Gateway API key authentication (validated from HTTP `Authorization` header and NATS payload)
 - [ ] Per-key and per-model rate limiting (NATS KV backed)
 - [ ] NATS server auth configuration examples (NKeys, JWTs)
+- [ ] HTTP proxy: rate limit headers (`X-RateLimit-*`, `Retry-After`)
 
 ### M4 — Production Readiness
-- [ ] Prometheus metrics (exposed via small HTTP endpoint on gateway)
-- [ ] Health check via NATS subject (`llm.health`)
+- [ ] Prometheus metrics (exposed via HTTP endpoint on gateway)
+- [ ] Health check: `GET /health` on proxy + `llm.health` NATS subject
 - [ ] Graceful shutdown with in-flight draining
 - [ ] Config hot-reload via NATS signal
-- [ ] Dockerfile & docker-compose (gateway + NATS server with WS enabled)
-- [ ] Integration tests (JS SDK ↔ gateway ↔ mock provider)
+- [ ] JS SDK: browser support via `nats.ws` (WebSocket)
+- [ ] Dockerfile & docker-compose (gateway + proxy + NATS server with WS enabled)
+- [ ] Integration tests (HTTP proxy + JS SDK ↔ gateway ↔ mock provider)
 
 ### M5 — Advanced Features
 - [ ] Tool/function calling pass-through
 - [ ] Provider failover
 - [ ] NATS JetStream persistence mode
-- [ ] Client-side HTTP→NATS proxy (`POST /v1/chat/completions` for legacy clients)
 - [ ] Go SDK
 - [ ] Python SDK
 - [ ] Additional provider adapters (Google Vertex, vLLM)
+- [ ] WebSocket provider adapters (OpenAI Realtime API, Gemini Live API)
 
 ### M6 — Client-Side Offloading
 - [ ] Client-side token counting (`js-tiktoken` WASM) — budget enforcement and prompt truncation before requests hit NATS

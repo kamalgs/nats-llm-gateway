@@ -1,36 +1,71 @@
 # nats-llm-gateway
 
-A **NATS-native** LLM gateway. Clients connect directly to NATS (TCP or WebSocket) — no HTTP layer in the gateway. A JavaScript/TypeScript SDK provides an OpenAI-compatible interface over NATS.
+A **NATS-native** LLM gateway. Route to any LLM provider through NATS with two integration paths:
+
+- **HTTP Proxy** — change `baseURL`, zero code changes. Works with any OpenAI SDK, LangChain, Vercel AI SDK, curl.
+- **NATS SDK** — direct NATS connection for lower latency and native streaming.
 
 ```
-Client (JS SDK) ──► NATS (TCP/WS) ──► Gateway Service ──► Provider Adapters ──► OpenAI / Anthropic / Ollama / ...
+┌─────────────────┐                                   ┌───────────────┐
+│ Existing app    │──HTTP──► HTTP Proxy ──► NATS ──►  │   Gateway     │──► OpenAI
+│ (just change    │                          │        │   Service     │──► Anthropic
+│  baseURL)       │                          │        │               │──► Ollama
+└─────────────────┘                          │        └───────────────┘
+┌─────────────────┐                          │
+│ New app         │──NATS (TCP/WS) ──────────┘
+│ (JS SDK)        │
+└─────────────────┘
 ```
 
 ## Features
 
-- **NATS-native** — no HTTP in the hot path; clients speak NATS protocol directly
-- **OpenAI-compatible JS SDK** — drop-in replacement for the `openai` npm package
-- **Multi-runtime** — works in Node.js, Deno, Bun (TCP) and browsers (WebSocket)
-- **Multi-provider routing** — route to OpenAI, Anthropic, Ollama, and more
-- **Streaming** — `async iterable` streaming over NATS, chunks flow direct from adapter to client
-- **Rate limiting** — per-key, per-model, and global limits backed by NATS KV
-- **Authentication** — NATS native auth (NKeys/JWTs) + gateway API key validation
+- **Zero-migration HTTP proxy** — `POST /v1/chat/completions` with SSE streaming
+- **NATS-native JS SDK** — OpenAI-compatible `client.chat.completions.create()` over NATS
+- **Multi-provider** — route to OpenAI, Anthropic, Ollama, and more
+- **Streaming** — SSE for HTTP clients, async iterables for SDK clients
+- **Rate limiting** — per-key, per-model, and global limits (NATS KV backed)
+- **Auth** — NATS native auth (NKeys/JWTs) + gateway API key validation
 
 ## Quick Start
 
 ```bash
-# Prerequisites: Node.js 18+, NATS server on localhost:4222
+# Prerequisites: Go 1.22+, Node.js 18+, Docker (for NATS)
 
 git clone https://github.com/kamalgs/nats-llm-gateway.git
 cd nats-llm-gateway
 
-# Start the gateway service
+# Start NATS + gateway + HTTP proxy
 cp configs/gateway.yaml.example configs/gateway.yaml
 # Edit configs/gateway.yaml with your provider API keys
-go run ./cmd/gateway --config configs/gateway.yaml
+docker-compose up
 ```
 
-Use the SDK in your application:
+### Option 1: HTTP Proxy (existing apps — zero code changes)
+
+```typescript
+// Just change baseURL — works with OpenAI SDK, LangChain, anything
+import OpenAI from 'openai';
+
+const client = new OpenAI({
+  baseURL: 'http://localhost:8080/v1',
+  apiKey: 'sk-my-key',
+});
+
+const resp = await client.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+```
+
+```bash
+# Works with curl too
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-my-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+### Option 2: NATS SDK (new apps — full NATS benefits)
 
 ```typescript
 import { NATSLLMClient } from 'nats-llm-client';
@@ -40,14 +75,13 @@ const client = new NATSLLMClient({
   apiKey: 'sk-my-key',
 });
 
-// Non-streaming — same interface as OpenAI SDK
-const response = await client.chat.completions.create({
+// Same API as OpenAI SDK
+const resp = await client.chat.completions.create({
   model: 'gpt-4o',
   messages: [{ role: 'user', content: 'Hello!' }],
 });
-console.log(response.choices[0].message.content);
 
-// Streaming — async iterable
+// Streaming
 const stream = await client.chat.completions.create({
   model: 'claude-sonnet',
   messages: [{ role: 'user', content: 'Write a poem' }],
@@ -60,11 +94,9 @@ for await (const chunk of stream) {
 await client.close();
 ```
 
-**Migrating from OpenAI SDK?** Just change the import and constructor — everything else stays the same.
-
 ## Documentation
 
-- [Design & Requirements](docs/DESIGN.md) — architecture, SDK design, NATS subject layout, and milestones
+- [Design & Requirements](docs/DESIGN.md) — architecture, integration tiers, NATS subject layout, and milestones
 
 ## License
 
