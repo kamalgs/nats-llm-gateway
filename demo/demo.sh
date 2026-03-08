@@ -32,17 +32,6 @@ for i in $(seq 1 30); do
 done
 
 echo ""
-echo "--- Discovering available models ---"
-echo ""
-models_response=$(curl -sf "$PROXY_URL/v1/models" || echo "N/A")
-echo "$models_response" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for m in data.get('data', []):
-    print(f\"  {m['id']:45s} provider: {m['provider']}\")
-" 2>/dev/null || echo "  (model discovery unavailable)"
-
-echo ""
 echo "--- Sending chat completions to all 6 models ---"
 echo ""
 

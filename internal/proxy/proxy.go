@@ -30,7 +30,6 @@ func New(nc *nats.Conn, addr string, log *slog.Logger) *Proxy {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", p.handleChatCompletion)
-	mux.HandleFunc("GET /v1/models", p.handleListModels)
 	mux.HandleFunc("GET /health", p.handleHealth)
 
 	p.server = &http.Server{
@@ -119,16 +118,6 @@ func (p *Proxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(msg.Data)
-}
-
-func (p *Proxy) handleListModels(w http.ResponseWriter, r *http.Request) {
-	msg, err := p.nc.Request("llm.models", nil, 5*time.Second)
-	if err != nil {
-		p.writeError(w, http.StatusBadGateway, "discovery_error", "model discovery failed: "+err.Error())
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(msg.Data)
 }

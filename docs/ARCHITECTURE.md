@@ -145,53 +145,15 @@ One hop. Proxy → Provider. No intermediary.
 
 ---
 
-## Hub (`cmd/hub`)
+## NATS Infrastructure (No Application Code)
 
-**Responsibility:** Embedded NATS server with model discovery.
-
-The hub is a NATS server compiled into a Go binary. It runs as the central
-hub in the leaf node topology AND provides model discovery by inspecting its
-own subscription table.
-
-- Embeds `nats-server` as a Go library (same one used in tests)
-- Accepts leaf node connections on port 7422
-- Connects an internal NATS client to itself
-- Responds to `llm.models` requests by querying `server.Subsz()` for
-  active `llm.provider.*` subscriptions
-
-**How discovery works:**
-
-The hub has direct access to its subscription routing table via the
-`server.Subsz()` API. When a provider connects (directly or via a leaf)
-and subscribes to `llm.provider.openai.>`, that subscription propagates
-to the hub. The hub reads this table, filters for `llm.provider.*`
-subjects, and derives:
-
-- **Wildcard subscriptions** (`llm.provider.openai.>`) → provider `openai`
-  is online, accepting any model
-- **Specific subscriptions** (`llm.provider.openai.gpt-4o`) → that exact
-  model is available
-
-The proxy's `GET /v1/models` endpoint requests `llm.models` via NATS,
-which the hub answers.
-
-**NATS interaction:**
-```
-Subscribes to: llm.models  (request-reply, returns model list)
-```
-
----
-
-## NATS Leaf Nodes (No Application Code)
-
-Leaf nodes handle geographic distribution. Pure infrastructure — config
-files, no Go code.
+NATS leaf nodes handle geographic distribution. This is pure infrastructure —
+config files, no Go code.
 
 ```
                     ┌─────────────────────┐
-                    │    Hub (cmd/hub)    │
+                    │      NATS Hub       │
                     │   :4222  leaf:7422  │
-                    │   + model discovery │
                     └──┬──────────────┬───┘
           leaf connect │              │ leaf connect
     ┌──────────────────┘              └───────────────────┐
@@ -205,10 +167,14 @@ files, no Go code.
 ```
 
 **What leaf nodes do:** Transparently extend the NATS subject space across
-geographic regions. When the proxy publishes `llm.provider.openai.gpt-4o`
-on the client leaf, NATS routes it to whichever leaf has a matching subscriber.
+geographic regions. When the proxy publishes `llm.provider.openai.gpt-4o` on the client leaf,
+NATS automatically routes it to whichever leaf has a matching subscriber.
+
+**What leaf nodes DON'T do:** No application logic. No model resolution. No
+request transformation. They're NATS servers with a `leafnodes.remotes` config.
 
 **Config files** (in `demo/`):
+- `nats-hub.conf` — central hub, accepts leaf connections on port 7422
 - `nats-leaf-client.conf` — client-side leaf, connects to hub
 - `nats-leaf-cloud.conf` — provider-side leaf for cloud APIs
 - `nats-leaf-edge.conf` — provider-side leaf for local models (Ollama)
@@ -219,7 +185,6 @@ on the client leaf, NATS routes it to whichever leaf has a matching subscriber.
 
 ```
 cmd/                          # Entrypoints — thin main() wrappers
-├── hub/main.go               #   Embedded NATS hub + model discovery
 ├── proxy/main.go             #   Starts the HTTP proxy
 ├── provider/main.go          #   Starts a single provider adapter
 └── mockllm/main.go           #   Starts the mock LLM server for testing
@@ -290,15 +255,14 @@ No coordination needed. NATS handles it.
 
 ## NATS Subjects Reference
 
-| Subject pattern                         | Publisher | Subscriber        | Payload            |
-|-----------------------------------------|-----------|-------------------|--------------------|
-| `llm.provider.openai.<model>`           | Proxy/SDK | OpenAI adapter    | `ProviderRequest`  |
-| `llm.provider.anthropic.<model>`        | Proxy/SDK | Anthropic adapter | `ProviderRequest`  |
-| `llm.provider.ollama.<model>`           | Proxy/SDK | Ollama adapter    | `ProviderRequest`  |
-| `llm.models`                            | Proxy/SDK | Hub               | (empty) → `ModelsResponse` |
+| Subject pattern                         | Publisher | Subscriber        | Payload          |
+|-----------------------------------------|-----------|-------------------|------------------|
+| `llm.provider.openai.<model>`           | Proxy/SDK | OpenAI adapter    | `ProviderRequest`|
+| `llm.provider.anthropic.<model>`        | Proxy/SDK | Anthropic adapter | `ProviderRequest`|
+| `llm.provider.ollama.<model>`           | Proxy/SDK | Ollama adapter    | `ProviderRequest`|
 
 Providers subscribe with `>` wildcard (e.g., `llm.provider.openai.>`) to
 handle all models, or to a specific subject for dedicated model handling.
 
-All use NATS request-reply pattern. Replies carry `ChatResponse`,
-`ErrorResponse`, or `ModelsResponse`.
+All use NATS request-reply pattern. Replies carry `ChatResponse` or
+`ErrorResponse`.

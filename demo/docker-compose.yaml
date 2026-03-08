@@ -2,14 +2,14 @@ services:
   # === NATS Infrastructure ===
 
   nats-hub:
-    build:
-      context: ..
-      dockerfile: demo/Dockerfile
-    entrypoint: ["hub"]
+    image: nats:2-alpine
     ports:
       - "4222:4222"
       - "7422:7422"
       - "8222:8222"
+    volumes:
+      - ./nats-hub.conf:/etc/nats/nats.conf
+    command: ["--config", "/etc/nats/nats.conf"]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
       interval: 2s
