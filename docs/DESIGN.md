@@ -2,73 +2,93 @@
 
 ## 1. Overview
 
-NATS LLM Gateway is a **NATS-native** LLM gateway. The core gateway has no
-HTTP layer — it communicates purely over NATS. Clients integrate via two paths:
+NATS LLM Gateway uses **NATS global clustering** to dynamically distribute
+LLM inference across geographies. GPU nodes, cloud API adapters, and clients
+connect to a NATS cluster (self-hosted, multi-region, or managed) from
+anywhere — the routing layer shifts load between regions based on capacity,
+latency, cost, and availability.
 
-1. **HTTP Proxy** (zero migration effort) — a thin `POST /v1/chat/completions`
-   endpoint that translates HTTP to NATS. Existing apps just change `baseURL`.
-   Works with any OpenAI SDK, LangChain, Vercel AI SDK, or raw `fetch()`.
-
-2. **NATS SDK** (full benefits) — a JS/TS SDK that mirrors the `openai` npm
-   package API over NATS directly. Lower latency, native streaming, direct
-   pub/sub access.
+The **OpenAI-compatible chat completion API** is the onramp — existing apps
+integrate with zero code changes. But the core value is underneath: a
+globally distributed inference mesh where adding GPU capacity in a new
+region is as simple as starting a NATS subscriber.
 
 ```
-  CLIENT EDGE (HTTP)              NATS BACKBONE                 INFERENCE
-  ═══════════════              ═══════════════════         ═══════════════════
-
- ┌─────────────┐                                         ┌─────────────────┐
- │ Existing app│               ┌─────────────┐           │  HTTP Adapter   │
- │ (OpenAI SDK │──HTTP──►┌─────┤   Gateway   ├──NATS───► │  (NATS→HTTP)    │──► OpenAI API
- │  LangChain  │         │     │   Service   │           │                 │──► Anthropic
- │  curl)      │    ┌────┴──┐  │  (routing,  │           └─────────────────┘
- └─────────────┘    │ HTTP  │  │   auth,     │
-                    │ Proxy ├──┤   rate      │           ┌─────────────────┐
- ┌─────────────┐    └───────┘  │   limit)   ├──NATS───► │ NATS-Native     │
- │  JS SDK     │               │             │           │ Model Server    │
- │  (Node/Bun/ │──NATS────────►│             │           │ (vLLM/Ollama    │
- │   Browser)  │               └─────────────┘           │  on local GPU)  │
- └─────────────┘                                         └─────────────────┘
-                     │◄──── NATS everywhere ────►│
-                     HTTP only at the edges
+  São Paulo             US-East              Frankfurt             Tokyo
+ ┌──────────┐                                                 ┌──────────┐
+ │  Client  ├─┐        ┌──────────┐         ┌──────────┐  ┌──┤  Client  │
+ └──────────┘ │        │ Gateway  │         │ Gateway  │  │  └──────────┘
+              │    ┌───►│ (route + │◄───┐    │ (route + ├──┘
+ ┌──────────┐ │    │    │  shift)  │    │    │  shift)  │     ┌──────────┐
+ │ GPU Node ├─┤    │    └────┬─────┘    │    └────┬─────┘  ┌──┤ GPU Node │
+ │ (Ollama) │ │    │         │          │         │        │  │ (vLLM)   │
+ └──────────┘ │    │   ┌─────┴─────┐    │   ┌─────┴─────┐  │  └──────────┘
+              ├────┼──►│   NATS    │◄───┼──►│   NATS    │◄─┤
+ ┌──────────┐ │    │   │  Cluster  ├────┼──►│  Cluster  │  │  ┌──────────┐
+ │HTTP Proxy├─┘    │   │  Node    │    │   │  Node    │  └──┤HTTP Proxy│
+ └──────────┘      │   └───────────┘    │   └───────────┘     └──────────┘
+                   │         │          │         │
+                   │   ┌─────┴─────┐    │   ┌─────┴─────┐
+                   └───┤ HTTP      │    └───┤ GPU Node  │
+                       │ Adapter   │        │ (local)   │
+                       │→ OpenAI   │        └───────────┘
+                       └───────────┘
 ```
 
-### Two Integration Tiers
+### Core Idea
 
-| | HTTP Proxy | NATS SDK |
-|---|---|---|
-| **Migration effort** | Change `baseURL` — zero code changes | Swap constructor — 1-2 lines |
-| **Works with** | Any language, any framework, curl | JS/TS (Node, Deno, Bun, browser) |
-| **Streaming** | SSE (`text/event-stream`) | Async iterables over NATS |
-| **Latency overhead** | HTTP parse + NATS hop | NATS only |
-| **Best for** | Existing apps, frameworks (LangChain, Vercel AI SDK) | New apps, performance-sensitive, advanced NATS patterns |
+Every participant — clients, gateways, model servers, cloud API adapters —
+is a **NATS subscriber**. NATS handles:
 
-### Why NATS-native (no HTTP in the gateway)?
+- **Geographic routing** — requests flow to the nearest available inference node
+- **Load balancing** — queue groups distribute across GPU nodes automatically
+- **Failover** — if a region goes down, NATS routes to the next available region
+- **Elastic scaling** — adding capacity = starting a subscriber; removing = stopping it
+- **Multi-tenancy** — NATS accounts provide hard isolation between tenants
 
-| Benefit | Detail |
+The gateway adds:
+
+- **Dynamic load shifting** — move traffic between regions based on real-time capacity, cost, and latency signals
+- **Model routing** — map model names to providers/regions
+- **OpenAI API compatibility** — HTTP proxy and JS SDK as onramps
+
+### Why NATS for Global Inference Routing?
+
+| Capability | How NATS enables it |
 |---|---|
-| **Lower latency** | No HTTP parse/serialize overhead; NATS binary protocol is faster |
-| **Built-in auth** | NATS has native user/token/NKey/JWT authentication — no custom auth middleware needed |
-| **Built-in streaming** | NATS subjects are natural streaming channels — no SSE/chunked-encoding complexity |
-| **WebSocket support** | NATS server natively exposes WebSocket endpoints — browser clients connect directly |
-| **Simpler gateway** | The gateway is just a NATS service — no HTTP framework, no middleware stack |
-| **Scalability** | Clients, gateway services, and adapters are all equal NATS participants; scale any independently |
+| **Multi-region clustering** | NATS superclusters span data centers; subjects route globally |
+| **Leaf nodes** | On-prem GPU clusters connect to the global mesh via outbound leaf node connections — no public IPs, no VPNs |
+| **Queue groups** | Automatic load distribution across inference nodes, zero configuration |
+| **Subject hierarchy** | `llm.provider.<name>.<region>` enables geographic routing at the subject level |
+| **Latency-aware routing** | NATS routes to the topologically nearest subscriber by default |
+| **Account isolation** | Built-in multi-tenancy with NATS accounts and JWTs |
+| **JetStream** | Persistent queues for backpressure when GPUs are saturated |
+| **Managed option** | Synadia Cloud provides a global NATS supercluster as a service — zero infrastructure to manage |
+
+### Client Onramps
+
+The OpenAI-compatible API makes adoption frictionless:
+
+| Onramp | Migration effort | Who it's for |
+|---|---|---|
+| **HTTP Proxy** | Change `baseURL` — zero code changes | Existing apps, any language, any framework |
+| **JS/TS SDK** | Swap constructor — 1-2 lines | Node.js/browser apps wanting direct NATS benefits |
+| **Raw NATS** | Publish JSON to a subject | Advanced users, other languages, custom integrations |
 
 ---
 
 ## 2. Goals
 
-1. **Zero-effort adoption** — HTTP proxy accepts `POST /v1/chat/completions`; existing apps just change `baseURL`.
-2. **NATS-native protocol** — core gateway communicates purely over NATS (TCP or WebSocket).
-3. **JavaScript SDK with OpenAI-compatible interface** — mirrors the `openai` npm package API for apps that want direct NATS benefits.
-4. **Multi-runtime** — SDK works in Node.js, Deno, Bun, and browsers.
-5. **Multi-provider routing** — route to OpenAI, Anthropic, Ollama, vLLM, or any provider via pluggable adapters.
-6. **Model aliasing & mapping** — expose virtual model names that map to real provider:model pairs.
-7. **Streaming first** — SSE for HTTP clients, async iterables over NATS for SDK clients.
-8. **Rate limiting** — per-user, per-model, and global rate limits enforced at the gateway service.
-9. **Authentication** — leverage NATS native auth (NKeys, JWTs, tokens) + gateway-level API key validation.
-10. **Observability** — structured logging, Prometheus metrics, OpenTelemetry traces.
-11. **Future SDKs** — Go, Python SDKs can be added later following the same wire protocol.
+1. **Dynamic geographic load shifting** — route inference requests across regions based on capacity, latency, cost, and availability in real time.
+2. **NATS global cluster as the backbone** — all components communicate over NATS; the cluster topology defines the inference network.
+3. **Elastic GPU scaling** — adding inference capacity in any region = starting a NATS subscriber. No reconfiguration.
+4. **Zero-effort client adoption** — OpenAI-compatible HTTP proxy and JS SDK as onramps.
+5. **Mixed infrastructure** — self-hosted GPUs, cloud APIs (OpenAI, Anthropic), and managed services coexist on the same NATS mesh.
+6. **Multi-tenancy** — NATS accounts provide hard tenant isolation with per-account rate limits and permissions.
+7. **Edge-to-cloud** — leaf nodes bridge on-prem GPU clusters, edge locations, and cloud regions into one global mesh.
+8. **Streaming first** — token-by-token streaming over NATS subjects from inference node directly to client.
+9. **Observability** — capacity metrics, routing decisions, and inference latency visible across the global mesh.
+10. **Deployment flexibility** — works with self-hosted NATS clusters, managed Synadia Cloud, or hybrid leaf-node setups.
 
 ---
 
@@ -76,38 +96,60 @@ HTTP layer — it communicates purely over NATS. Clients integrate via two paths
 
 ### 3.1 Functional Requirements
 
+**Global Routing & Load Shifting**
+
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| FR-1 | HTTP proxy: `POST /v1/chat/completions` → NATS (drop-in for any OpenAI client) | P0 |
-| FR-2 | HTTP proxy: SSE streaming support (`stream: true`) | P0 |
-| FR-3 | HTTP proxy: `GET /v1/models` endpoint | P0 |
-| FR-4 | JS SDK: `chat.completions.create(req)` with OpenAI-compatible request/response types | P0 |
-| FR-5 | JS SDK: streaming via async iterable (`for await...of`) when `stream: true` | P0 |
-| FR-6 | JS SDK: works in Node.js (TCP) and browsers (WebSocket) | P1 |
-| FR-7 | Gateway service: accept requests on NATS subjects, route by model | P0 |
-| FR-8 | Provider adapters for OpenAI, Anthropic, Ollama | P0 |
-| FR-9 | Model aliasing — map virtual model names to provider:model pairs | P1 |
-| FR-10 | Authentication via NATS native auth + gateway-level API key check | P0 |
-| FR-11 | Per-user and per-model rate limiting at the gateway | P0 |
-| FR-12 | Return OpenAI-compatible response and error structures | P0 |
-| FR-13 | Request/response logging with redaction of sensitive fields | P1 |
-| FR-14 | Graceful shutdown with in-flight request draining | P1 |
-| FR-15 | Tool/function calling pass-through | P2 |
-| FR-16 | Provider failover — retry on a secondary provider if primary fails | P2 |
-| FR-17 | Go SDK | P2 |
-| FR-18 | Python SDK | P2 |
+| FR-1 | Gateway routes requests to inference nodes based on model + region | P0 |
+| FR-2 | Geographic subject hierarchy: `llm.provider.<name>.<region>` | P0 |
+| FR-3 | Dynamic load shifting — move traffic between regions based on capacity signals | P0 |
+| FR-4 | Inference node health reporting — GPU utilization, queue depth, latency published to status subjects | P0 |
+| FR-5 | Region failover — if a region's inference nodes are unavailable, route to next-best region | P0 |
+| FR-6 | Weighted routing — distribute across regions by configurable weights (cost, latency, capacity) | P1 |
+| FR-7 | NATS leaf node support for on-prem GPU clusters connecting to global mesh | P1 |
+| FR-8 | Multi-tenancy via NATS accounts with per-account isolation and limits | P1 |
+
+**Client Onramps (OpenAI Compatibility)**
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| FR-10 | HTTP proxy: `POST /v1/chat/completions` → NATS (drop-in for any OpenAI client) | P0 |
+| FR-11 | HTTP proxy: SSE streaming support (`stream: true`) | P0 |
+| FR-12 | JS SDK: `chat.completions.create(req)` with OpenAI-compatible types | P0 |
+| FR-13 | JS SDK: streaming via async iterable (`for await...of`) | P0 |
+| FR-14 | Return OpenAI-compatible response and error structures | P0 |
+| FR-15 | HTTP proxy: `GET /v1/models` (returns models available across all regions) | P1 |
+
+**Inference & Providers**
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| FR-20 | NATS-native model server: inference engine subscribes directly to NATS | P0 |
+| FR-21 | HTTP adapter: bridge to cloud APIs (OpenAI, Anthropic) via NATS→HTTP | P0 |
+| FR-22 | Model aliasing — virtual model names map to provider:region pairs | P1 |
+| FR-23 | Provider failover — retry on a different provider/region on failure | P1 |
+| FR-24 | Tool/function calling pass-through | P2 |
+
+**Platform**
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| FR-30 | Authentication via NATS native auth (NKeys/JWTs) + gateway API key | P0 |
+| FR-31 | Per-tenant and per-model rate limiting | P0 |
+| FR-32 | Request/response logging with redaction of sensitive fields | P1 |
+| FR-33 | Graceful shutdown with in-flight request draining | P1 |
 
 ### 3.2 Non-Functional Requirements
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-1 | P99 gateway-added latency (excluding LLM time) | < 2 ms |
-| NFR-2 | Concurrent request capacity | 10 000+ |
-| NFR-3 | Configuration hot-reload without restart | Yes |
-| NFR-4 | Single statically-linked binary (gateway) | Yes |
-| NFR-5 | Container image size | < 30 MB |
-| NFR-6 | JS SDK bundle size (browser, minified+gzipped) | < 20 KB (excl. NATS client) |
-| NFR-7 | JS SDK: zero dependencies beyond `nats.ws` / `nats` | Yes |
+| NFR-1 | P99 gateway-added latency (excluding LLM + network time) | < 2 ms |
+| NFR-2 | Concurrent request capacity per gateway instance | 10 000+ |
+| NFR-3 | Region failover time (detect + reroute) | < 5 s |
+| NFR-4 | Configuration hot-reload without restart | Yes |
+| NFR-5 | Single statically-linked binary (gateway) | Yes |
+| NFR-6 | Container image size | < 30 MB |
+| NFR-7 | JS SDK bundle size (browser, minified+gzipped) | < 20 KB (excl. NATS client) |
 
 ---
 
@@ -696,75 +738,74 @@ URL changes.
 
 ## 6. Milestones
 
-### M1 — Walking Skeleton (HTTP Proxy + Gateway + One Provider)
-- [ ] HTTP proxy: `POST /v1/chat/completions` → NATS translation (non-streaming)
-- [ ] HTTP proxy: `GET /v1/models` endpoint
-- [ ] Gateway service: subscribe to `llm.chat.complete`, route to provider
-- [ ] OpenAI provider adapter (pass-through)
-- [ ] JS SDK: `NATSLLMClient` with NATS connection (Node.js TCP)
-- [ ] JS SDK: `chat.completions.create()` — non-streaming request/reply
-- [ ] JS SDK: OpenAI-compatible types (TypeScript)
-- [ ] End-to-end: existing OpenAI SDK client → HTTP proxy → NATS → Gateway → OpenAI → response
-- [ ] End-to-end: JS SDK → NATS → Gateway → OpenAI → response
-- [ ] docker-compose: NATS server + gateway + proxy for local dev
+The milestones are ordered to build toward the central goal: **dynamic
+geographic load shifting for LLM inference**. Early milestones establish
+the onramp (OpenAI compatibility) and single-region plumbing. Later
+milestones add multi-region routing, capacity-aware load shifting, and
+global deployment.
 
-### M2 — Streaming & Multi-Provider
-- [ ] HTTP proxy: SSE streaming (`stream: true` → `text/event-stream`)
-- [ ] JS SDK: streaming via async iterable (`for await...of`)
-- [ ] Gateway + adapter streaming via NATS pub/sub
-- [ ] Anthropic provider adapter (Messages API → OpenAI format translation)
-- [ ] Ollama provider adapter
+### M0 — Tracer Bullet ✅
+- [x] End-to-end: HTTP proxy → NATS → Gateway → NATS → OpenAI adapter
+- [x] End-to-end: JS SDK → NATS → Gateway → OpenAI adapter
+- [x] Module boundaries proven (loosely coupled via NATS messages)
+- [x] Unit, integration, and benchmark tests
+
+### M1 — Single-Region Foundations
+- [ ] Streaming: HTTP proxy SSE + JS SDK async iterables + NATS pub/sub
+- [ ] Anthropic and Ollama provider adapters
 - [ ] Model aliasing and routing
-
-### M3 — Auth & Rate Limiting
-- [ ] Gateway API key authentication (validated from HTTP `Authorization` header and NATS payload)
+- [ ] Auth: API key validation + NATS native auth examples
 - [ ] Per-key and per-model rate limiting (NATS KV backed)
-- [ ] NATS server auth configuration examples (NKeys, JWTs)
-- [ ] HTTP proxy: rate limit headers (`X-RateLimit-*`, `Retry-After`)
+- [ ] docker-compose: NATS + gateway + proxy + Ollama for local dev
 
-### M4 — Production Readiness
-- [ ] Prometheus metrics (exposed via HTTP endpoint on gateway)
+### M2 — NATS-Native Inference
+- [ ] Reference NATS-native model server wrapping Ollama (subscribes directly to NATS)
+- [ ] NATS-native model server wrapping vLLM (Python NATS subscriber)
+- [ ] Multi-GPU load balancing via NATS queue groups
+- [ ] Streaming inference: tokens published directly from model server to client inbox
+- [ ] Benchmark: NATS-native vs HTTP-based inference overhead
+- [ ] Mixed deployment: local Ollama (NATS-native) + cloud OpenAI (HTTP adapter)
+
+### M3 — Geographic Routing
+- [ ] Geographic subject hierarchy: `llm.provider.<name>.<region>`
+- [ ] Inference node registration: nodes announce region, models, and capacity on connect
+- [ ] Region-aware routing: gateway routes to the nearest region with available capacity
+- [ ] Multi-region NATS cluster setup (3-node example across regions)
+- [ ] Leaf node configuration for on-prem GPU clusters bridging into the global mesh
+- [ ] Region failover: detect unavailable region, reroute within <5s
+- [ ] Benchmark: cross-region latency through NATS cluster vs direct API calls
+
+### M4 — Dynamic Load Shifting
+- [ ] Capacity signaling: model servers publish GPU utilization, queue depth, and inference latency to `llm.status.<provider>.<region>`
+- [ ] Gateway aggregates capacity signals from all regions into a real-time routing table
+- [ ] Weighted routing: distribute requests across regions by configurable weights (latency, cost, utilization)
+- [ ] Automatic load shifting: when a region becomes saturated (GPU util > threshold), shift traffic to regions with spare capacity
+- [ ] Cost-aware routing: prefer cheaper regions when latency is comparable
+- [ ] Routing dashboard: real-time visibility into per-region capacity, request distribution, and routing decisions
+- [ ] Drain region: admin command to gracefully shift all traffic away from a region (for maintenance)
+
+### M5 — Multi-Tenancy & Production
+- [ ] NATS account-based multi-tenancy — hard isolation between tenants
+- [ ] Per-tenant rate limits and model permissions via NATS account config
+- [ ] Prometheus metrics: per-region, per-model, per-tenant request rates and latencies
 - [ ] Health check: `GET /health` on proxy + `llm.health` NATS subject
 - [ ] Graceful shutdown with in-flight draining
 - [ ] Config hot-reload via NATS signal
-- [ ] JS SDK: browser support via `nats.ws` (WebSocket)
-- [ ] Dockerfile & docker-compose (gateway + proxy + NATS server with WS enabled)
-- [ ] Integration tests (HTTP proxy + JS SDK ↔ gateway ↔ mock provider)
+- [ ] Dockerfile & docker-compose for multi-region simulation
 
-### M5 — Advanced Features
+### M6 — Global Deployment
+- [ ] NATS supercluster deployment guide (self-hosted, multi-region)
+- [ ] Synadia Cloud deployment option — connect to managed global NATS
+- [ ] Leaf node hybrid: on-prem GPU clusters + cloud regions on one mesh
+- [ ] Example: global LLM service — GPU nodes in 3 regions, clients worldwide
+- [ ] Benchmark: global routing latency, failover time, load shifting responsiveness
+
+### M7 — Advanced Features
 - [ ] Tool/function calling pass-through
-- [ ] Provider failover
-- [ ] NATS JetStream persistence mode
-- [ ] Go SDK
-- [ ] Python SDK
-- [ ] Additional provider adapters (Google Vertex, vLLM)
+- [ ] NATS JetStream persistence for request replay and audit
 - [ ] WebSocket provider adapters (OpenAI Realtime API, Gemini Live API)
-
-### M6 — Client-Side Offloading
-- [ ] Client-side token counting (`js-tiktoken` WASM) — budget enforcement and prompt truncation before requests hit NATS
-- [ ] Prompt hash deduplication — SDK hashes prompt content, gateway deduplicates identical in-flight requests to avoid redundant inference
-- [ ] Client-side RAG assembly — SDK helpers for local embedding (via `transformers.js`) + retrieval, sending only the final assembled prompt
-- [ ] Prefix caching hints — SDK signals reusable prompt prefixes so inference servers can skip KV cache recomputation
-
-### M7 — NATS-Native Inference
-- [ ] Reference NATS-native model server wrapping Ollama (Go binary, subscribes to `llm.provider.<name>`)
-- [ ] NATS-native model server wrapping vLLM (Python process with NATS subscriber)
-- [ ] Multi-GPU load balancing via NATS queue groups (extractly zero config — just start more subscribers)
-- [ ] Streaming inference: model server publishes tokens directly to client inbox subject
-- [ ] Health/readiness signaling: model servers publish GPU utilization and queue depth to `llm.provider.<name>.status`
-- [ ] NATS leaf node configuration for edge inference (model server in remote location, connected via leaf node)
-- [ ] Benchmark: NATS-native inference vs HTTP-based Ollama/vLLM (measure eliminated HTTP overhead)
-- [ ] Mixed deployment example: docker-compose with local Ollama (NATS-native) + cloud OpenAI (HTTP adapter)
-
-### M8 — Global Deployment (Synadia Cloud / NGS)
-- [ ] Synadia Cloud deployment guide — connect gateway, adapters, and model servers to NGS
-- [ ] NATS account-based multi-tenancy — replace gateway API key auth with NATS JWT accounts
-- [ ] Cross-account exports/imports — shared gateway account serving multiple tenant accounts
-- [ ] Leaf node setup for hybrid deployment — on-prem GPU nodes connecting to Synadia Cloud
-- [ ] Multi-region routing — clients and model servers in different regions, NATS routes optimally
-- [ ] Per-account rate limiting via NATS account limits (replaces/complements gateway-level rate limiting)
-- [ ] Example: global LLM service — GPU nodes in 3 regions, clients worldwide, zero self-managed infrastructure
-- [ ] Benchmark: latency across regions via Synadia Cloud vs. direct cloud API calls
+- [ ] Go SDK, Python SDK
+- [ ] Client-side offloading: token counting, prompt dedup, prefix caching hints
 
 ---
 
