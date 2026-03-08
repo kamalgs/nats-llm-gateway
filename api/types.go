@@ -1,4 +1,4 @@
-// Package api defines the wire format types shared across all gateway components.
+// Package api defines the wire format types shared across all components.
 // All NATS messages use these types serialized as JSON.
 package api
 
@@ -48,8 +48,8 @@ type APIError struct {
 	Code    string `json:"code"`
 }
 
-// ProviderRequest is the internal wire format on llm.provider.<name>.
-// The gateway resolves the model alias and sends the upstream model name.
+// ProviderRequest is the wire format on llm.provider.<name>.
+// The proxy splits the "provider.model" name and sends the upstream model name.
 type ProviderRequest struct {
 	UpstreamModel string      `json:"upstream_model"`
 	Request       ChatRequest `json:"request"`

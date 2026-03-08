@@ -9,17 +9,11 @@ import (
 
 type Config struct {
 	NATS      NATSConfig               `yaml:"nats"`
-	Models    map[string]ModelConfig    `yaml:"models"`
 	Providers map[string]ProviderConfig `yaml:"providers"`
 }
 
 type NATSConfig struct {
 	URL string `yaml:"url"`
-}
-
-type ModelConfig struct {
-	Provider      string `yaml:"provider"`
-	UpstreamModel string `yaml:"upstream_model"`
 }
 
 type ProviderConfig struct {

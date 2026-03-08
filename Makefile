@@ -2,7 +2,6 @@
 
 # Build
 build:
-	go build -o gateway ./cmd/gateway
 	go build -o proxy ./cmd/proxy
 	go build -o provider ./cmd/provider
 	go build -o mockllm ./cmd/mockllm
@@ -44,4 +43,4 @@ demo-test:
 	bash demo/demo.sh
 
 clean:
-	rm -f gateway proxy provider mockllm
+	rm -f proxy provider mockllm

@@ -94,8 +94,7 @@ func (a *Adapter) ChatCompletion(ctx context.Context, req *api.ProviderRequest) 
 }
 
 // Subscribe registers this adapter as a NATS subscriber on llm.provider.openai.
-// This enables loose coupling — the gateway sends requests via NATS, the adapter
-// processes them independently.
+// The proxy publishes requests to this subject; the adapter processes them independently.
 func (a *Adapter) Subscribe(nc *nats.Conn) (*nats.Subscription, error) {
 	subject := "llm.provider." + a.Name()
 	sub, err := nc.QueueSubscribe(subject, QueueGroup, func(msg *nats.Msg) {

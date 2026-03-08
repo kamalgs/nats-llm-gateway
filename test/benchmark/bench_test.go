@@ -1,4 +1,4 @@
-// Package benchmark measures gateway performance.
+// Package benchmark measures proxy and provider performance.
 package benchmark
 
 import (
@@ -15,7 +15,6 @@ import (
 
 	"github.com/kamalgs/infermesh/api"
 	"github.com/kamalgs/infermesh/internal/config"
-	"github.com/kamalgs/infermesh/internal/gateway"
 	openaiAdapter "github.com/kamalgs/infermesh/internal/provider/openai"
 	"github.com/kamalgs/infermesh/internal/proxy"
 	"github.com/kamalgs/infermesh/internal/testutil"
@@ -67,27 +66,15 @@ func setupBenchStack(b *testing.B) *benchStack {
 		ns.Shutdown()
 	})
 
-	cfg := &config.Config{
-		Models: map[string]config.ModelConfig{
-			"bench": {Provider: "openai", UpstreamModel: "bench-model"},
-		},
-		Providers: map[string]config.ProviderConfig{
-			"openai": {BaseURL: mock.URL, APIKey: "key"},
-		},
-	}
-
 	log := silentLogger()
 
-	adapter := openaiAdapter.NewAdapter(cfg.Providers["openai"], log)
+	adapter := openaiAdapter.NewAdapter(config.ProviderConfig{BaseURL: mock.URL, APIKey: "key"}, log)
 	sub, _ := adapter.Subscribe(nc)
 	b.Cleanup(func() { sub.Drain() })
 
-	gw := gateway.New(nc, cfg, log)
-	gw.Start()
-	b.Cleanup(gw.Stop)
-
+	// Model uses provider.model convention
 	req := api.ChatRequest{
-		Model:    "bench",
+		Model:    "openai.bench-model",
 		Messages: []api.Message{{Role: "user", Content: "hi"}},
 	}
 	reqData, _ := json.Marshal(req)
@@ -106,16 +93,25 @@ func setupBenchStack(b *testing.B) *benchStack {
 	return &benchStack{nc: nc, proxyURL: proxyURL, reqData: reqData}
 }
 
-// BenchmarkNATSRequestReply measures raw NATS request/reply through the gateway.
+// BenchmarkNATSRequestReply measures raw NATS request/reply to a provider.
 // This is the SDK path latency.
 func BenchmarkNATSRequestReply(b *testing.B) {
 	s := setupBenchStack(b)
+
+	provReq := api.ProviderRequest{
+		UpstreamModel: "bench-model",
+		Request: api.ChatRequest{
+			Model:    "openai.bench-model",
+			Messages: []api.Message{{Role: "user", Content: "hi"}},
+		},
+	}
+	provData, _ := json.Marshal(provReq)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		msg, err := s.nc.Request("llm.chat.complete", s.reqData, 10*time.Second)
+		msg, err := s.nc.Request("llm.provider.openai", provData, 10*time.Second)
 		if err != nil {
 			b.Fatalf("request: %v", err)
 		}
@@ -129,11 +125,19 @@ func BenchmarkNATSRequestReply(b *testing.B) {
 func BenchmarkNATSRequestReplyParallel(b *testing.B) {
 	s := setupBenchStack(b)
 
+	provReq := api.ProviderRequest{
+		UpstreamModel: "bench-model",
+		Request: api.ChatRequest{
+			Model:    "openai.bench-model",
+			Messages: []api.Message{{Role: "user", Content: "hi"}},
+		},
+	}
+	provData, _ := json.Marshal(provReq)
+
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	b.RunParallel(func(pb *testing.PB) {
-		// Each goroutine needs its own NATS connection for parallel requests
 		nc2, err := nats.Connect(s.nc.ConnectedUrl())
 		if err != nil {
 			b.Fatalf("connect: %v", err)
@@ -141,7 +145,7 @@ func BenchmarkNATSRequestReplyParallel(b *testing.B) {
 		defer nc2.Close()
 
 		for pb.Next() {
-			msg, err := nc2.Request("llm.chat.complete", s.reqData, 10*time.Second)
+			msg, err := nc2.Request("llm.provider.openai", provData, 10*time.Second)
 			if err != nil {
 				b.Fatalf("request: %v", err)
 			}
@@ -206,68 +210,10 @@ func BenchmarkHTTPProxyParallel(b *testing.B) {
 	})
 }
 
-// BenchmarkGatewayRouting measures just the gateway routing (no upstream call).
-// Uses a NATS mock provider that replies instantly.
-func BenchmarkGatewayRouting(b *testing.B) {
-	mock := fastMockLLM()
-	defer mock.Close()
-
-	ns, nc := testutil.StartNATS(&testing.T{})
-	defer func() {
-		nc.Close()
-		ns.Shutdown()
-	}()
-
-	cfg := &config.Config{
-		Models: map[string]config.ModelConfig{
-			"bench": {Provider: "openai", UpstreamModel: "x"},
-		},
-		Providers: map[string]config.ProviderConfig{
-			"openai": {BaseURL: mock.URL, APIKey: "k"},
-		},
-	}
-
-	log := silentLogger()
-
-	// Use a pure NATS mock provider (no HTTP) to isolate gateway overhead
-	nc2, _ := nats.Connect(nc.ConnectedUrl())
-	defer nc2.Close()
-
-	respBytes, _ := json.Marshal(api.ChatResponse{
-		ID:      "fast",
-		Object:  "chat.completion",
-		Model:   "x",
-		Choices: []api.Choice{{Index: 0, Message: &api.Message{Role: "assistant", Content: "ok"}, FinishReason: "stop"}},
-	})
-
-	nc2.QueueSubscribe("llm.provider.openai", "bench", func(msg *nats.Msg) {
-		msg.Respond(respBytes)
-	})
-	nc2.Flush()
-
-	gw := gateway.New(nc, cfg, log)
-	gw.Start()
-	defer gw.Stop()
-
-	req := api.ChatRequest{Model: "bench", Messages: []api.Message{{Role: "user", Content: "hi"}}}
-	reqData, _ := json.Marshal(req)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		msg, err := nc.Request("llm.chat.complete", reqData, 5*time.Second)
-		if err != nil {
-			b.Fatalf("request: %v", err)
-		}
-		_ = msg.Data
-	}
-}
-
 // BenchmarkJSONMarshal measures the serialization overhead.
 func BenchmarkJSONMarshal(b *testing.B) {
 	req := api.ChatRequest{
-		Model: "gpt-4o",
+		Model: "openai.gpt-4o",
 		Messages: []api.Message{
 			{Role: "system", Content: "You are a helpful assistant."},
 			{Role: "user", Content: "Explain quantum computing in simple terms."},

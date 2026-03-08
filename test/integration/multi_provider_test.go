@@ -9,7 +9,6 @@ import (
 
 	"github.com/kamalgs/infermesh/api"
 	"github.com/kamalgs/infermesh/internal/config"
-	"github.com/kamalgs/infermesh/internal/gateway"
 	anthropicAdapter "github.com/kamalgs/infermesh/internal/provider/anthropic"
 	ollamaAdapter "github.com/kamalgs/infermesh/internal/provider/ollama"
 	openaiAdapter "github.com/kamalgs/infermesh/internal/provider/openai"
@@ -100,76 +99,57 @@ func TestMultiProvider_Routing(t *testing.T) {
 	defer ollamaMock.Close()
 
 	_, nc := testutil.StartNATS(t)
-
-	cfg := &config.Config{
-		Models: map[string]config.ModelConfig{
-			"gpt-4o":        {Provider: "openai", UpstreamModel: "gpt-4o-2024-08-06"},
-			"gpt-4o-mini":   {Provider: "openai", UpstreamModel: "gpt-4o-mini-2024-07-18"},
-			"claude-sonnet": {Provider: "anthropic", UpstreamModel: "claude-sonnet-4-20250514"},
-			"claude-haiku":  {Provider: "anthropic", UpstreamModel: "claude-haiku-4-5-20251001"},
-			"llama3":        {Provider: "ollama", UpstreamModel: "llama3:8b"},
-			"mistral":       {Provider: "ollama", UpstreamModel: "mistral:7b"},
-		},
-		Providers: map[string]config.ProviderConfig{
-			"openai":    {BaseURL: openaiMock.URL, APIKey: "test-key"},
-			"anthropic": {BaseURL: anthropicMock.URL, APIKey: "test-key"},
-			"ollama":    {BaseURL: ollamaMock.URL},
-		},
-	}
-
 	log := silentLogger()
 
 	// Start all three provider adapters
-	oa := openaiAdapter.NewAdapter(cfg.Providers["openai"], log)
+	oa := openaiAdapter.NewAdapter(config.ProviderConfig{BaseURL: openaiMock.URL, APIKey: "test-key"}, log)
 	oaSub, err := oa.Subscribe(nc)
 	if err != nil {
 		t.Fatalf("subscribe openai: %v", err)
 	}
 	defer oaSub.Drain()
 
-	aa := anthropicAdapter.NewAdapter(cfg.Providers["anthropic"], log)
+	aa := anthropicAdapter.NewAdapter(config.ProviderConfig{BaseURL: anthropicMock.URL, APIKey: "test-key"}, log)
 	aaSub, err := aa.Subscribe(nc)
 	if err != nil {
 		t.Fatalf("subscribe anthropic: %v", err)
 	}
 	defer aaSub.Drain()
 
-	ol := ollamaAdapter.NewAdapter(cfg.Providers["ollama"], log)
+	ol := ollamaAdapter.NewAdapter(config.ProviderConfig{BaseURL: ollamaMock.URL}, log)
 	olSub, err := ol.Subscribe(nc)
 	if err != nil {
 		t.Fatalf("subscribe ollama: %v", err)
 	}
 	defer olSub.Drain()
 
-	// Start gateway
-	gw := gateway.New(nc, cfg, log)
-	if err := gw.Start(); err != nil {
-		t.Fatalf("start gateway: %v", err)
-	}
-	defer gw.Stop()
-
 	tests := []struct {
-		model         string
-		wantUpstream  string
-		wantProvider  string
+		upstreamModel string
+		provider      string
+		subject       string
 	}{
-		{"gpt-4o", "gpt-4o-2024-08-06", "openai"},
-		{"gpt-4o-mini", "gpt-4o-mini-2024-07-18", "openai"},
-		{"claude-sonnet", "claude-sonnet-4-20250514", "anthropic"},
-		{"claude-haiku", "claude-haiku-4-5-20251001", "anthropic"},
-		{"llama3", "llama3:8b", "ollama"},
-		{"mistral", "mistral:7b", "ollama"},
+		{"gpt-4o", "openai", "llm.provider.openai"},
+		{"gpt-4o-mini", "openai", "llm.provider.openai"},
+		{"claude-sonnet-4-20250514", "anthropic", "llm.provider.anthropic"},
+		{"claude-haiku-4-5-20251001", "anthropic", "llm.provider.anthropic"},
+		{"llama3:8b", "ollama", "llm.provider.ollama"},
+		{"mistral:7b", "ollama", "llm.provider.ollama"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.model, func(t *testing.T) {
-			req := api.ChatRequest{
-				Model:    tt.model,
-				Messages: []api.Message{{Role: "user", Content: "test"}},
+		t.Run(tt.provider+"."+tt.upstreamModel, func(t *testing.T) {
+			// Client sends ProviderRequest directly to the provider subject
+			// (this is what the proxy does after parsing the model name)
+			req := api.ProviderRequest{
+				UpstreamModel: tt.upstreamModel,
+				Request: api.ChatRequest{
+					Model:    tt.provider + "." + tt.upstreamModel,
+					Messages: []api.Message{{Role: "user", Content: "test"}},
+				},
 			}
 			data, _ := json.Marshal(req)
 
-			msg, err := nc.Request("llm.chat.complete", data, 5*time.Second)
+			msg, err := nc.Request(tt.subject, data, 5*time.Second)
 			if err != nil {
 				t.Fatalf("request: %v", err)
 			}
@@ -179,11 +159,11 @@ func TestMultiProvider_Routing(t *testing.T) {
 				t.Fatalf("unmarshal: %v", err)
 			}
 
-			if resp.Model != tt.wantUpstream {
-				t.Errorf("model: got %q, want %q", resp.Model, tt.wantUpstream)
+			if resp.Model != tt.upstreamModel {
+				t.Errorf("model: got %q, want %q", resp.Model, tt.upstreamModel)
 			}
 
-			wantContent := tt.wantProvider + ": " + tt.wantUpstream
+			wantContent := tt.provider + ": " + tt.upstreamModel
 			if resp.Choices[0].Message.Content != wantContent {
 				t.Errorf("content: got %q, want %q", resp.Choices[0].Message.Content, wantContent)
 			}
@@ -200,72 +180,65 @@ func TestMultiProvider_UnifiedResponseFormat(t *testing.T) {
 	defer ollamaMock.Close()
 
 	_, nc := testutil.StartNATS(t)
-
-	cfg := &config.Config{
-		Models: map[string]config.ModelConfig{
-			"gpt-4o":        {Provider: "openai", UpstreamModel: "gpt-4o-2024-08-06"},
-			"claude-sonnet": {Provider: "anthropic", UpstreamModel: "claude-sonnet-4-20250514"},
-			"llama3":        {Provider: "ollama", UpstreamModel: "llama3:8b"},
-		},
-		Providers: map[string]config.ProviderConfig{
-			"openai":    {BaseURL: openaiMock.URL, APIKey: "test-key"},
-			"anthropic": {BaseURL: anthropicMock.URL, APIKey: "test-key"},
-			"ollama":    {BaseURL: ollamaMock.URL},
-		},
-	}
-
 	log := silentLogger()
 
-	oa := openaiAdapter.NewAdapter(cfg.Providers["openai"], log)
+	oa := openaiAdapter.NewAdapter(config.ProviderConfig{BaseURL: openaiMock.URL, APIKey: "test-key"}, log)
 	oaSub, _ := oa.Subscribe(nc)
 	defer oaSub.Drain()
 
-	aa := anthropicAdapter.NewAdapter(cfg.Providers["anthropic"], log)
+	aa := anthropicAdapter.NewAdapter(config.ProviderConfig{BaseURL: anthropicMock.URL, APIKey: "test-key"}, log)
 	aaSub, _ := aa.Subscribe(nc)
 	defer aaSub.Drain()
 
-	ol := ollamaAdapter.NewAdapter(cfg.Providers["ollama"], log)
+	ol := ollamaAdapter.NewAdapter(config.ProviderConfig{BaseURL: ollamaMock.URL}, log)
 	olSub, _ := ol.Subscribe(nc)
 	defer olSub.Drain()
 
-	gw := gateway.New(nc, cfg, log)
-	gw.Start()
-	defer gw.Stop()
-
 	// All responses should have the same unified format regardless of provider
-	models := []string{"gpt-4o", "claude-sonnet", "llama3"}
-	for _, model := range models {
-		req := api.ChatRequest{
-			Model:    model,
-			Messages: []api.Message{{Role: "user", Content: "test"}},
-		}
-		data, _ := json.Marshal(req)
+	subjects := []struct {
+		subject string
+		model   string
+	}{
+		{"llm.provider.openai", "gpt-4o"},
+		{"llm.provider.anthropic", "claude-sonnet-4-20250514"},
+		{"llm.provider.ollama", "llama3:8b"},
+	}
 
-		msg, err := nc.Request("llm.chat.complete", data, 5*time.Second)
-		if err != nil {
-			t.Fatalf("%s request: %v", model, err)
-		}
+	for _, s := range subjects {
+		t.Run(s.subject, func(t *testing.T) {
+			req := api.ProviderRequest{
+				UpstreamModel: s.model,
+				Request: api.ChatRequest{
+					Messages: []api.Message{{Role: "user", Content: "test"}},
+				},
+			}
+			data, _ := json.Marshal(req)
 
-		var resp api.ChatResponse
-		if err := json.Unmarshal(msg.Data, &resp); err != nil {
-			t.Fatalf("%s unmarshal: %v", model, err)
-		}
+			msg, err := nc.Request(s.subject, data, 5*time.Second)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
 
-		// Verify unified response structure
-		if resp.Object != "chat.completion" {
-			t.Errorf("%s: object = %q, want chat.completion", model, resp.Object)
-		}
-		if len(resp.Choices) != 1 {
-			t.Errorf("%s: choices count = %d, want 1", model, len(resp.Choices))
-		}
-		if resp.Choices[0].Message == nil {
-			t.Errorf("%s: message is nil", model)
-		}
-		if resp.Choices[0].FinishReason != "stop" {
-			t.Errorf("%s: finish_reason = %q, want stop", model, resp.Choices[0].FinishReason)
-		}
-		if resp.Usage == nil {
-			t.Errorf("%s: usage is nil", model)
-		}
+			var resp api.ChatResponse
+			if err := json.Unmarshal(msg.Data, &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			if resp.Object != "chat.completion" {
+				t.Errorf("object = %q, want chat.completion", resp.Object)
+			}
+			if len(resp.Choices) != 1 {
+				t.Errorf("choices count = %d, want 1", len(resp.Choices))
+			}
+			if resp.Choices[0].Message == nil {
+				t.Errorf("message is nil")
+			}
+			if resp.Choices[0].FinishReason != "stop" {
+				t.Errorf("finish_reason = %q, want stop", resp.Choices[0].FinishReason)
+			}
+			if resp.Usage == nil {
+				t.Errorf("usage is nil")
+			}
+		})
 	}
 }

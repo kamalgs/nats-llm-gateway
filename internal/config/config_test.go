@@ -11,14 +11,6 @@ func TestLoad(t *testing.T) {
 nats:
   url: "nats://localhost:4222"
 
-models:
-  "gpt-4o":
-    provider: openai
-    upstream_model: "gpt-4o-2024-08-06"
-  "llama3":
-    provider: ollama
-    upstream_model: "llama3:70b"
-
 providers:
   openai:
     base_url: "https://api.openai.com/v1"
@@ -37,21 +29,16 @@ providers:
 		t.Errorf("nats.url: got %q", cfg.NATS.URL)
 	}
 
-	if len(cfg.Models) != 2 {
-		t.Fatalf("models: got %d, want 2", len(cfg.Models))
-	}
-
-	gpt := cfg.Models["gpt-4o"]
-	if gpt.Provider != "openai" {
-		t.Errorf("gpt-4o provider: got %q", gpt.Provider)
-	}
-	if gpt.UpstreamModel != "gpt-4o-2024-08-06" {
-		t.Errorf("gpt-4o upstream_model: got %q", gpt.UpstreamModel)
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("providers: got %d, want 2", len(cfg.Providers))
 	}
 
 	openai := cfg.Providers["openai"]
 	if openai.APIKey != "sk-test-key" {
 		t.Errorf("openai api_key: got %q", openai.APIKey)
+	}
+	if openai.BaseURL != "https://api.openai.com/v1" {
+		t.Errorf("openai base_url: got %q", openai.BaseURL)
 	}
 }
 

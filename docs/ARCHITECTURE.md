@@ -2,30 +2,35 @@
 
 ## What InferMesh Does
 
-InferMesh is a unified LLM API gateway. You send one HTTP request to one endpoint,
-and it routes to the right LLM provider (OpenAI, Anthropic, Ollama, etc.) based on
-the model name. Geographic distribution happens through NATS leaf nodes — no
-application code needed for that part.
+InferMesh is a unified LLM API. You send one HTTP request to one endpoint, and
+it routes to the right LLM provider (OpenAI, Anthropic, Ollama) based on the
+model name. Geographic distribution happens through NATS leaf nodes — pure
+infrastructure, no application code.
 
-## The Three Application Components
+## The Two Application Components
 
-There are exactly three application-level components. Everything else is NATS
+There are exactly two application components. Everything else is NATS
 infrastructure.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Application Components                      │
-│                                                                 │
-│   ┌───────────┐        ┌────────────┐        ┌──────────────┐  │
-│   │   Proxy   │──NATS──│   Router   │──NATS──│   Provider   │  │
-│   │  (HTTP→   │        │  (model    │        │  (NATS→HTTP  │  │
-│   │   NATS)   │        │  resolver) │        │   to LLM)    │  │
-│   └───────────┘        └────────────┘        └──────────────┘  │
-│                                                                 │
-│   cmd/proxy            cmd/gateway            cmd/provider      │
-│   internal/proxy       internal/gateway       internal/provider │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                  Application Components                   │
+│                                                          │
+│   ┌───────────┐                       ┌──────────────┐   │
+│   │   Proxy   │───── NATS ──────────► │   Provider   │   │
+│   │  (HTTP →  │  llm.provider.<name>  │  (NATS →     │   │
+│   │   NATS)   │                       │   HTTP LLM)  │   │
+│   └───────────┘                       └──────────────┘   │
+│                                                          │
+│   cmd/proxy                            cmd/provider      │
+│   internal/proxy                       internal/provider  │
+└──────────────────────────────────────────────────────────┘
 ```
+
+There is no router, orchestrator, or gateway code. The model name encodes
+the provider, so the proxy publishes directly to the right NATS subject.
+
+---
 
 ### 1. Proxy (`cmd/proxy`, `internal/proxy`)
 
@@ -33,54 +38,29 @@ infrastructure.
 
 - Exposes `POST /v1/chat/completions` (OpenAI-compatible)
 - Exposes `GET /health`
-- Receives HTTP request, publishes it to NATS subject `llm.chat.complete`
+- Parses the model name using the `provider.model` convention
+  (e.g., `openai.gpt-4o` → provider `openai`, upstream model `gpt-4o`)
+- Publishes a `ProviderRequest` to NATS subject `llm.provider.<provider>`
 - Waits for NATS reply, writes it back as HTTP response
 - Maps error codes to HTTP status codes (404, 429, 400, 500)
-- Has zero knowledge of models, providers, or configs
 
 **NATS interaction:**
 ```
-Publishes to:  llm.chat.complete  (request-reply)
+Publishes to:  llm.provider.<provider>  (request-reply)
 ```
 
 **Why it exists:** So existing OpenAI SDKs and `curl` work unchanged — just
-point `base_url` at the proxy.
+point `base_url` at the proxy and prefix model names with the provider.
 
 ---
 
-### 2. Router (`cmd/gateway`, `internal/gateway`)
+### 2. Provider (`cmd/provider`, `internal/provider/*`)
 
-> Note: The code calls this "gateway" but it's really a **router** — it resolves
-> model aliases and forwards to the right provider. The actual NATS gateway/leaf
-> node topology is pure infrastructure (see below).
-
-**Responsibility:** Model-to-provider resolution and request forwarding.
-
-- Subscribes to `llm.chat.complete` (queue group: `gateway`)
-- Looks up the requested model name in config (e.g., `"gpt-4o"` → provider
-  `"openai"`, upstream model `"gpt-4o-2024-08-06"`)
-- Wraps the request in a `ProviderRequest` with the resolved upstream model name
-- Publishes to `llm.provider.<provider-name>` (e.g., `llm.provider.openai`)
-- Waits for the provider's reply, passes it back to the proxy
-
-**NATS interaction:**
-```
-Subscribes to: llm.chat.complete         (queue group: "gateway")
-Publishes to:  llm.provider.<provider>   (request-reply, 30s timeout)
-```
-
-**What it knows:** The model→provider mapping from config. That's it. It does not
-know how to call any LLM API. It does not start providers.
-
----
-
-### 3. Provider (`cmd/provider`, `internal/provider/*`)
-
-**Responsibility:** NATS-to-HTTP bridge for a specific LLM API.
+**Responsibility:** NATS consumer that calls an upstream LLM API.
 
 Each provider is a NATS queue subscriber that:
 - Subscribes to `llm.provider.<name>` (e.g., `llm.provider.anthropic`)
-- Receives a `ProviderRequest` from the router
+- Receives a `ProviderRequest` from the proxy (or SDK)
 - Translates it into the provider's native HTTP API format
 - Calls the upstream LLM API over HTTP
 - Translates the response back into the unified `ChatResponse` format
@@ -110,23 +90,40 @@ ollama:    subscribes to llm.provider.ollama     (queue: "provider-ollama")
 
 ---
 
+## Model Naming Convention
+
+Models are named `provider.model`. The part before the first dot is the
+provider, the rest is passed to the upstream API as-is.
+
+```
+openai.gpt-4o                      → provider: openai,    model: gpt-4o
+openai.gpt-4o-mini                 → provider: openai,    model: gpt-4o-mini
+anthropic.claude-sonnet-4-20250514 → provider: anthropic, model: claude-sonnet-4-20250514
+ollama.llama3:8b                   → provider: ollama,    model: llama3:8b
+```
+
+This means:
+- No routing table needed. The model name IS the routing key.
+- Clients know exactly which provider they're hitting.
+- Adding a new provider is just deploying a new adapter — no config changes
+  anywhere else.
+
+---
+
 ## The Complete Request Flow
 
 ```
-curl POST /v1/chat/completions {model: "claude-sonnet", messages: [...]}
+curl POST /v1/chat/completions
+     {model: "anthropic.claude-sonnet-4-20250514", messages: [...]}
   │
   ▼
 ┌──────────┐  HTTP
-│  Proxy   │  Validates JSON, publishes to NATS
-└────┬─────┘
-     │  NATS publish: "llm.chat.complete"
-     ▼
-┌──────────┐
-│  Router  │  Looks up "claude-sonnet" in config
-│          │  → provider: "anthropic", upstream: "claude-sonnet-4-20250514"
-│          │  Wraps in ProviderRequest
+│  Proxy   │  Parses "anthropic.claude-sonnet-4-20250514"
+│          │  → provider: "anthropic"
+│          │  → upstream: "claude-sonnet-4-20250514"
 └────┬─────┘
      │  NATS publish: "llm.provider.anthropic"
+     │  payload: ProviderRequest{UpstreamModel: "claude-sonnet-4-20250514", ...}
      ▼
 ┌──────────┐
 │ Provider │  Translates to Anthropic Messages API format
@@ -135,12 +132,11 @@ curl POST /v1/chat/completions {model: "claude-sonnet", messages: [...]}
      │  HTTP response from Anthropic
      │  Translates back to unified ChatResponse
      │
-     ▼  (NATS reply chain unwinds)
-Router receives reply → passes through → Proxy receives reply → HTTP 200
+     ▼  (NATS reply)
+Proxy receives reply → HTTP 200 with ChatResponse JSON
 ```
 
-Every arrow between application components is a NATS request-reply message.
-No component calls another directly. They only share NATS subjects.
+One hop. Proxy → Provider. No intermediary.
 
 ---
 
@@ -166,13 +162,11 @@ config files, no Go code.
 ```
 
 **What leaf nodes do:** Transparently extend the NATS subject space across
-geographic regions. When the proxy publishes `llm.chat.complete` on the client
-leaf, NATS automatically routes it to the hub, which routes it to whichever
-leaf has a subscriber for that subject.
+geographic regions. When the proxy publishes `llm.provider.openai` on the
+client leaf, NATS automatically routes it to whichever leaf has a subscriber.
 
 **What leaf nodes DON'T do:** No application logic. No model resolution. No
-request transformation. They're just NATS servers with a `leafnodes.remotes`
-config pointing at the hub.
+request transformation. They're NATS servers with a `leafnodes.remotes` config.
 
 **Config files** (in `demo/`):
 - `nats-hub.conf` — central hub, accepts leaf connections on port 7422
@@ -187,13 +181,11 @@ config pointing at the hub.
 ```
 cmd/                          # Entrypoints — thin main() wrappers
 ├── proxy/main.go             #   Starts the HTTP proxy
-├── gateway/main.go           #   Starts the router (and optionally providers)
 ├── provider/main.go          #   Starts a single provider adapter
 └── mockllm/main.go           #   Starts the mock LLM server for testing
 
 internal/                     # Core logic — libraries used by cmd/
-├── proxy/proxy.go            #   HTTP server, request forwarding
-├── gateway/gateway.go        #   Model resolution, NATS routing
+├── proxy/proxy.go            #   HTTP server, model name parsing, NATS publishing
 ├── provider/
 │   ├── provider.go           #   Provider interface definition
 │   ├── openai/openai.go      #   OpenAI adapter
@@ -217,59 +209,17 @@ api/                          # Wire format types shared by all components
 
 ---
 
-## Deployment Modes
-
-### Mode 1: All-in-one (local dev)
-
-`cmd/gateway/main.go` can start the router AND provider adapters in one process.
-This is a convenience for `go run ./cmd/gateway` during development.
-
-```
-┌─────────────────────────────────────────┐
-│  Single process (cmd/gateway)           │
-│                                         │
-│  Router + OpenAI + Anthropic + Ollama   │
-│  all subscribe on same NATS connection  │
-└─────────────────────────────────────────┘
-```
-
-### Mode 2: Separate processes (production / demo)
-
-Each component runs as its own container/process, connected to different NATS
-leaf nodes.
-
-```
-Container: proxy         → connects to client leaf
-Container: gateway       → connects to hub (runs router only, no providers in config)
-Container: provider-openai    → connects to cloud leaf
-Container: provider-anthropic → connects to cloud leaf
-Container: provider-ollama    → connects to edge leaf
-```
-
-The demo docker-compose (`demo/docker-compose.yaml`) uses Mode 2 with 10
-services.
-
----
-
 ## Configuration
 
+Providers need config for their upstream API credentials. The proxy needs no
+config — just a NATS URL.
+
+**Provider config** (`configs/provider.yaml` or `demo/demo.yaml`):
 ```yaml
-# demo/demo.yaml
 nats:
   url: "${NATS_URL:-nats://localhost:4222}"
 
-models:                              # Model alias → provider + upstream name
-  "gpt-4o":
-    provider: openai
-    upstream_model: "gpt-4o-2024-08-06"
-  "claude-sonnet":
-    provider: anthropic
-    upstream_model: "claude-sonnet-4-20250514"
-  "llama3":
-    provider: ollama
-    upstream_model: "llama3:8b"
-
-providers:                           # Provider connection details
+providers:
   openai:
     base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
     api_key: "${OPENAI_API_KEY}"
@@ -286,13 +236,10 @@ Environment variables are expanded at load time (`${VAR}` syntax).
 
 ## Scaling
 
-Because every component uses NATS queue groups, you scale by running more
-instances:
+Because providers use NATS queue groups, you scale by running more instances:
 
-- **Multiple proxies:** All subscribe to the same HTTP port behind a load
-  balancer, all publish to the same NATS subject.
-- **Multiple routers:** Queue group `"gateway"` ensures only one handles each
-  request.
+- **Multiple proxies:** All connect to NATS, all parse model names the same
+  way. Put them behind a load balancer.
 - **Multiple providers:** Queue group `"provider-openai"` distributes requests
   across OpenAI adapter instances. Run 5 instances to handle 5 concurrent
   OpenAI requests.
@@ -303,11 +250,11 @@ No coordination needed. NATS handles it.
 
 ## NATS Subjects Reference
 
-| Subject                    | Publisher | Subscriber      | Payload          |
-|----------------------------|-----------|-----------------|------------------|
-| `llm.chat.complete`        | Proxy     | Router          | `ChatRequest`    |
-| `llm.provider.openai`      | Router    | OpenAI adapter  | `ProviderRequest`|
-| `llm.provider.anthropic`   | Router    | Anthropic adapter| `ProviderRequest`|
-| `llm.provider.ollama`      | Router    | Ollama adapter  | `ProviderRequest`|
+| Subject                    | Publisher | Subscriber        | Payload          |
+|----------------------------|-----------|-------------------|------------------|
+| `llm.provider.openai`      | Proxy/SDK | OpenAI adapter    | `ProviderRequest`|
+| `llm.provider.anthropic`   | Proxy/SDK | Anthropic adapter | `ProviderRequest`|
+| `llm.provider.ollama`      | Proxy/SDK | Ollama adapter    | `ProviderRequest`|
 
-All use NATS request-reply pattern. Replies carry `ChatResponse` or `ErrorResponse`.
+All use NATS request-reply pattern. Replies carry `ChatResponse` or
+`ErrorResponse`.

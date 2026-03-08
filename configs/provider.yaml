@@ -1,0 +1,7 @@
+nats:
+  url: "nats://localhost:4222"
+
+providers:
+  openai:
+    base_url: "https://api.openai.com/v1"
+    api_key: "${OPENAI_API_KEY}"

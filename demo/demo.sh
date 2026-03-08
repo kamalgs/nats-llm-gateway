@@ -2,7 +2,16 @@
 set -euo pipefail
 
 PROXY_URL="${PROXY_URL:-http://localhost:8080}"
-MODELS=("gpt-4o" "gpt-4o-mini" "claude-sonnet" "claude-haiku" "llama3" "mistral")
+
+# Models use provider.model convention
+MODELS=(
+  "openai.gpt-4o"
+  "openai.gpt-4o-mini"
+  "anthropic.claude-sonnet-4-20250514"
+  "anthropic.claude-haiku-4-5-20251001"
+  "ollama.llama3:8b"
+  "ollama.mistral:7b"
+)
 
 echo "=== InferMesh Multi-Provider Demo ==="
 echo "Proxy: $PROXY_URL"

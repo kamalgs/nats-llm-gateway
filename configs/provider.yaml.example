@@ -1,0 +1,12 @@
+nats:
+  url: "nats://localhost:4222"
+
+providers:
+  openai:
+    base_url: "https://api.openai.com/v1"
+    api_key: "${OPENAI_API_KEY}"
+  anthropic:
+    base_url: "https://api.anthropic.com"
+    api_key: "${ANTHROPIC_API_KEY}"
+  ollama:
+    base_url: "http://localhost:11434/v1"

@@ -1,26 +1,6 @@
 nats:
   url: "${NATS_URL:-nats://localhost:4222}"
 
-models:
-  "gpt-4o":
-    provider: openai
-    upstream_model: "gpt-4o-2024-08-06"
-  "gpt-4o-mini":
-    provider: openai
-    upstream_model: "gpt-4o-mini-2024-07-18"
-  "claude-sonnet":
-    provider: anthropic
-    upstream_model: "claude-sonnet-4-20250514"
-  "claude-haiku":
-    provider: anthropic
-    upstream_model: "claude-haiku-4-5-20251001"
-  "llama3":
-    provider: ollama
-    upstream_model: "llama3:8b"
-  "mistral":
-    provider: ollama
-    upstream_model: "mistral:7b"
-
 providers:
   openai:
     base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"

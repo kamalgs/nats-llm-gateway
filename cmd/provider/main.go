@@ -23,9 +23,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfgPath := os.Getenv("GATEWAY_CONFIG")
+	cfgPath := os.Getenv("PROVIDER_CONFIG")
 	if cfgPath == "" {
-		cfgPath = "configs/gateway.yaml"
+		cfgPath = "configs/provider.yaml"
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

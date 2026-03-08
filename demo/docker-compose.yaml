@@ -64,25 +64,6 @@ services:
     ports:
       - "9999:9999"
 
-  gateway:
-    build:
-      context: ..
-      dockerfile: demo/Dockerfile
-    entrypoint: ["gateway"]
-    environment:
-      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
-      NATS_URL: "nats://nats-hub:4222"
-      OPENAI_BASE_URL: "http://mockllm:9999/v1"
-      ANTHROPIC_BASE_URL: "http://mockllm:9999"
-      OLLAMA_BASE_URL: "http://mockllm:9999/v1"
-      OPENAI_API_KEY: "mock-key"
-      ANTHROPIC_API_KEY: "mock-key"
-    depends_on:
-      nats-hub:
-        condition: service_healthy
-      mockllm:
-        condition: service_started
-
   proxy:
     build:
       context: ..
@@ -96,8 +77,6 @@ services:
     depends_on:
       nats-leaf-client:
         condition: service_started
-      gateway:
-        condition: service_started
 
   provider-openai:
     build:
@@ -106,13 +85,10 @@ services:
     entrypoint: ["provider"]
     environment:
       PROVIDER_NAME: openai
-      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
+      PROVIDER_CONFIG: /etc/infermesh/demo.yaml
       NATS_URL: "nats://nats-leaf-cloud:4223"
       OPENAI_BASE_URL: "http://mockllm:9999/v1"
-      ANTHROPIC_BASE_URL: "http://mockllm:9999"
-      OLLAMA_BASE_URL: "http://mockllm:9999/v1"
       OPENAI_API_KEY: "mock-key"
-      ANTHROPIC_API_KEY: "mock-key"
     depends_on:
       nats-leaf-cloud:
         condition: service_started
@@ -126,12 +102,9 @@ services:
     entrypoint: ["provider"]
     environment:
       PROVIDER_NAME: anthropic
-      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
+      PROVIDER_CONFIG: /etc/infermesh/demo.yaml
       NATS_URL: "nats://nats-leaf-cloud:4223"
-      OPENAI_BASE_URL: "http://mockllm:9999/v1"
       ANTHROPIC_BASE_URL: "http://mockllm:9999"
-      OLLAMA_BASE_URL: "http://mockllm:9999/v1"
-      OPENAI_API_KEY: "mock-key"
       ANTHROPIC_API_KEY: "mock-key"
     depends_on:
       nats-leaf-cloud:
@@ -146,13 +119,9 @@ services:
     entrypoint: ["provider"]
     environment:
       PROVIDER_NAME: ollama
-      GATEWAY_CONFIG: /etc/infermesh/demo.yaml
+      PROVIDER_CONFIG: /etc/infermesh/demo.yaml
       NATS_URL: "nats://nats-leaf-edge:4224"
-      OPENAI_BASE_URL: "http://mockllm:9999/v1"
-      ANTHROPIC_BASE_URL: "http://mockllm:9999"
       OLLAMA_BASE_URL: "http://mockllm:9999/v1"
-      OPENAI_API_KEY: "mock-key"
-      ANTHROPIC_API_KEY: "mock-key"
     depends_on:
       nats-leaf-edge:
         condition: service_started

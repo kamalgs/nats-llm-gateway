@@ -1,5 +1,5 @@
 // Package integration tests the full request path:
-// HTTP proxy → NATS → Gateway → NATS → Provider Adapter → mock upstream
+// HTTP proxy → NATS → Provider Adapter → mock upstream
 package integration
 
 import (
@@ -16,7 +16,6 @@ import (
 
 	"github.com/kamalgs/infermesh/api"
 	"github.com/kamalgs/infermesh/internal/config"
-	"github.com/kamalgs/infermesh/internal/gateway"
 	openaiAdapter "github.com/kamalgs/infermesh/internal/provider/openai"
 	"github.com/kamalgs/infermesh/internal/proxy"
 	"github.com/kamalgs/infermesh/internal/testutil"
@@ -61,44 +60,27 @@ func mockLLM(t *testing.T) *httptest.Server {
 	}))
 }
 
-// startStack starts NATS, gateway, provider adapter, and HTTP proxy.
-// Returns the proxy HTTP URL and a cleanup function.
+// startStack starts NATS, provider adapter, and HTTP proxy.
+// Returns the proxy HTTP URL.
 func startStack(t *testing.T) (proxyURL string) {
 	t.Helper()
 
 	mock := mockLLM(t)
 	t.Cleanup(mock.Close)
 
-	ns, nc := testutil.StartNATS(t)
-	natsURL := testutil.NATSUrl(ns)
+	_, nc := testutil.StartNATS(t)
+	natsURL := nc.ConnectedUrl()
 
-	cfg := &config.Config{
-		NATS: config.NATSConfig{URL: natsURL},
-		Models: map[string]config.ModelConfig{
-			"gpt-4o":       {Provider: "openai", UpstreamModel: "gpt-4o-2024-08-06"},
-			"claude-sonnet": {Provider: "openai", UpstreamModel: "claude-sonnet-mock"},
-		},
-		Providers: map[string]config.ProviderConfig{
-			"openai": {BaseURL: mock.URL, APIKey: "test-key"},
-		},
-	}
-
+	cfg := config.ProviderConfig{BaseURL: mock.URL, APIKey: "test-key"}
 	log := silentLogger()
 
 	// Start provider adapter
-	adapter := openaiAdapter.NewAdapter(cfg.Providers["openai"], log)
+	adapter := openaiAdapter.NewAdapter(cfg, log)
 	sub, err := adapter.Subscribe(nc)
 	if err != nil {
 		t.Fatalf("subscribe adapter: %v", err)
 	}
 	t.Cleanup(func() { sub.Drain() })
-
-	// Start gateway
-	gw := gateway.New(nc, cfg, log)
-	if err := gw.Start(); err != nil {
-		t.Fatalf("start gateway: %v", err)
-	}
-	t.Cleanup(gw.Stop)
 
 	// Start proxy on a random port
 	nc2, err := nats.Connect(natsURL)
@@ -107,26 +89,11 @@ func startStack(t *testing.T) (proxyURL string) {
 	}
 	t.Cleanup(func() { nc2.Close() })
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	proxyURL = fmt.Sprintf("http://127.0.0.1:%d", listener.Addr().(*net.TCPAddr).Port)
-
+	listener, _ := net.Listen("tcp", "127.0.0.1:0")
+	proxyURL = fmt.Sprintf("http://%s", listener.Addr().String())
 	p := proxy.New(nc2, listener.Addr().String(), log)
-	go func() {
-		p.Start()
-	}()
-	// Give proxy time to bind — it's already listening via the addr above
-	// Actually we need to use the listener. Let me just use the proxy's HTTP handler directly.
 	listener.Close()
-
-	// Use a simpler approach: start the proxy server directly
-	listener2, _ := net.Listen("tcp", "127.0.0.1:0")
-	proxyURL = fmt.Sprintf("http://%s", listener2.Addr().String())
-	p2 := proxy.New(nc2, listener2.Addr().String(), log)
-	listener2.Close()
-	go p2.Start()
+	go p.Start()
 	time.Sleep(100 * time.Millisecond) // wait for bind
 
 	return proxyURL
@@ -145,9 +112,9 @@ func TestE2E_HTTPProxyChatCompletion(t *testing.T) {
 		t.Fatalf("health status: %d", resp.StatusCode)
 	}
 
-	// Test chat completion
+	// Test chat completion — model uses provider.model convention
 	chatReq := api.ChatRequest{
-		Model:    "gpt-4o",
+		Model:    "openai.gpt-4o",
 		Messages: []api.Message{{Role: "user", Content: "integration test"}},
 	}
 	body, _ := json.Marshal(chatReq)
@@ -166,8 +133,8 @@ func TestE2E_HTTPProxyChatCompletion(t *testing.T) {
 	var chatResp api.ChatResponse
 	json.NewDecoder(resp.Body).Decode(&chatResp)
 
-	if chatResp.Model != "gpt-4o-2024-08-06" {
-		t.Errorf("model: got %q", chatResp.Model)
+	if chatResp.Model != "gpt-4o" {
+		t.Errorf("model: got %q, want gpt-4o", chatResp.Model)
 	}
 	if chatResp.Choices[0].Message.Content != "echo: integration test" {
 		t.Errorf("content: got %q", chatResp.Choices[0].Message.Content)
@@ -177,7 +144,7 @@ func TestE2E_HTTPProxyChatCompletion(t *testing.T) {
 	}
 }
 
-func TestE2E_HTTPProxyModelNotFound(t *testing.T) {
+func TestE2E_InvalidModelFormat(t *testing.T) {
 	proxyURL := startStack(t)
 
 	chatReq := api.ChatRequest{
@@ -192,52 +159,41 @@ func TestE2E_HTTPProxyModelNotFound(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status: got %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status: got %d, want 400", resp.StatusCode)
 	}
 
 	var errResp api.ErrorResponse
 	json.NewDecoder(resp.Body).Decode(&errResp)
-	if errResp.Error.Code != "model_not_found" {
+	if errResp.Error.Code != "invalid_request" {
 		t.Errorf("code: got %q", errResp.Error.Code)
 	}
 }
 
-func TestE2E_NATSDirectChatCompletion(t *testing.T) {
+func TestE2E_NATSDirectProviderRequest(t *testing.T) {
 	mock := mockLLM(t)
 	defer mock.Close()
 
-	ns, nc := testutil.StartNATS(t)
-	natsURL := testutil.NATSUrl(ns)
-	_ = natsURL
+	_, nc := testutil.StartNATS(t)
 
-	cfg := &config.Config{
-		Models: map[string]config.ModelConfig{
-			"gpt-4o": {Provider: "openai", UpstreamModel: "gpt-4o-2024-08-06"},
-		},
-		Providers: map[string]config.ProviderConfig{
-			"openai": {BaseURL: mock.URL, APIKey: "test-key"},
-		},
-	}
-
+	cfg := config.ProviderConfig{BaseURL: mock.URL, APIKey: "test-key"}
 	log := silentLogger()
 
-	adapter := openaiAdapter.NewAdapter(cfg.Providers["openai"], log)
+	adapter := openaiAdapter.NewAdapter(cfg, log)
 	sub, _ := adapter.Subscribe(nc)
 	defer sub.Drain()
 
-	gw := gateway.New(nc, cfg, log)
-	gw.Start()
-	defer gw.Stop()
-
-	// Simulate what the JS SDK does — direct NATS request
-	req := api.ChatRequest{
-		Model:    "gpt-4o",
-		Messages: []api.Message{{Role: "user", Content: "direct nats"}},
+	// Send directly to provider subject (what SDK would do)
+	req := api.ProviderRequest{
+		UpstreamModel: "gpt-4o",
+		Request: api.ChatRequest{
+			Model:    "openai.gpt-4o",
+			Messages: []api.Message{{Role: "user", Content: "direct nats"}},
+		},
 	}
 	data, _ := json.Marshal(req)
 
-	msg, err := nc.Request("llm.chat.complete", data, 5*time.Second)
+	msg, err := nc.Request("llm.provider.openai", data, 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -247,53 +203,5 @@ func TestE2E_NATSDirectChatCompletion(t *testing.T) {
 
 	if resp.Choices[0].Message.Content != "echo: direct nats" {
 		t.Errorf("content: got %q", resp.Choices[0].Message.Content)
-	}
-}
-
-func TestE2E_MultipleModelRouting(t *testing.T) {
-	mock := mockLLM(t)
-	defer mock.Close()
-
-	_, nc := testutil.StartNATS(t)
-
-	cfg := &config.Config{
-		Models: map[string]config.ModelConfig{
-			"gpt-4o":        {Provider: "openai", UpstreamModel: "gpt-4o-2024-08-06"},
-			"claude-sonnet":  {Provider: "openai", UpstreamModel: "claude-sonnet-mock"},
-		},
-		Providers: map[string]config.ProviderConfig{
-			"openai": {BaseURL: mock.URL, APIKey: "test-key"},
-		},
-	}
-
-	log := silentLogger()
-	adapter := openaiAdapter.NewAdapter(cfg.Providers["openai"], log)
-	sub, _ := adapter.Subscribe(nc)
-	defer sub.Drain()
-
-	gw := gateway.New(nc, cfg, log)
-	gw.Start()
-	defer gw.Stop()
-
-	// Request gpt-4o
-	req1 := api.ChatRequest{Model: "gpt-4o", Messages: []api.Message{{Role: "user", Content: "hi"}}}
-	data1, _ := json.Marshal(req1)
-	msg1, _ := nc.Request("llm.chat.complete", data1, 5*time.Second)
-	var resp1 api.ChatResponse
-	json.Unmarshal(msg1.Data, &resp1)
-
-	if resp1.Model != "gpt-4o-2024-08-06" {
-		t.Errorf("gpt-4o routed to: %q", resp1.Model)
-	}
-
-	// Request claude-sonnet
-	req2 := api.ChatRequest{Model: "claude-sonnet", Messages: []api.Message{{Role: "user", Content: "hi"}}}
-	data2, _ := json.Marshal(req2)
-	msg2, _ := nc.Request("llm.chat.complete", data2, 5*time.Second)
-	var resp2 api.ChatResponse
-	json.Unmarshal(msg2.Data, &resp2)
-
-	if resp2.Model != "claude-sonnet-mock" {
-		t.Errorf("claude-sonnet routed to: %q", resp2.Model)
 	}
 }
