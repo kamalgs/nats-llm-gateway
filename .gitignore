@@ -1,0 +1,33 @@
+# Binaries (output binary at repo root)
+/gateway
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.html
+
+# Dependency
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets
+configs/gateway.yaml
+!configs/gateway.yaml.example
+
+# Environment
+.env
+.env.*

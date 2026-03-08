@@ -1,0 +1,47 @@
+server:
+  listen: ":8080"
+  read_timeout: 30s
+  write_timeout: 120s
+
+nats:
+  url: "nats://localhost:4222"
+  jetstream:
+    enabled: false
+
+auth:
+  enabled: true
+  keys:
+    - key: "sk-example-key-1"
+      name: "my-app"
+      rate_limit: "100/min"
+      allowed_models: ["gpt-4o", "claude-sonnet"]
+    - key: "sk-example-key-2"
+      name: "batch-service"
+      rate_limit: "1000/min"
+
+rate_limit:
+  global: "5000/min"
+  per_model:
+    "gpt-4o": "500/min"
+    "claude-sonnet": "1000/min"
+
+models:
+  "gpt-4o":
+    provider: openai
+    upstream_model: "gpt-4o"
+  "claude-sonnet":
+    provider: anthropic
+    upstream_model: "claude-sonnet-4-6-20250514"
+  "llama3":
+    provider: ollama
+    upstream_model: "llama3:70b"
+
+providers:
+  openai:
+    base_url: "https://api.openai.com/v1"
+    api_key: "${OPENAI_API_KEY}"
+  anthropic:
+    base_url: "https://api.anthropic.com"
+    api_key: "${ANTHROPIC_API_KEY}"
+  ollama:
+    base_url: "http://localhost:11434"
