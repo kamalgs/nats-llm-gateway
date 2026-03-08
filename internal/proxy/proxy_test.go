@@ -46,11 +46,11 @@ func TestProxy_HealthCheck(t *testing.T) {
 func TestProxy_ChatCompletion(t *testing.T) {
 	_, nc := testutil.StartNATS(t)
 
-	// Mock provider subscriber on llm.provider.openai
+	// Mock provider subscriber — wildcard matches all openai models
 	nc2, _ := nats.Connect(nc.ConnectedUrl())
 	t.Cleanup(func() { nc2.Close() })
 
-	nc2.Subscribe("llm.provider.openai", func(msg *nats.Msg) {
+	nc2.Subscribe("llm.provider.openai.>", func(msg *nats.Msg) {
 		var provReq api.ProviderRequest
 		json.Unmarshal(msg.Data, &provReq)
 
@@ -108,7 +108,7 @@ func TestProxy_RoutesToCorrectProvider(t *testing.T) {
 	var receivedSubject string
 	var receivedModel string
 
-	nc2.Subscribe("llm.provider.anthropic", func(msg *nats.Msg) {
+	nc2.Subscribe("llm.provider.anthropic.>", func(msg *nats.Msg) {
 		receivedSubject = msg.Subject
 		var provReq api.ProviderRequest
 		json.Unmarshal(msg.Data, &provReq)
@@ -144,8 +144,9 @@ func TestProxy_RoutesToCorrectProvider(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("status: got %d, want 200", w.Code)
 	}
-	if receivedSubject != "llm.provider.anthropic" {
-		t.Errorf("subject: got %q, want llm.provider.anthropic", receivedSubject)
+	wantSubject := "llm.provider.anthropic.claude-sonnet-4-20250514"
+	if receivedSubject != wantSubject {
+		t.Errorf("subject: got %q, want %q", receivedSubject, wantSubject)
 	}
 	if receivedModel != "claude-sonnet-4-20250514" {
 		t.Errorf("upstream model: got %q, want claude-sonnet-4-20250514", receivedModel)
@@ -191,7 +192,7 @@ func TestProxy_ErrorPropagation(t *testing.T) {
 	nc2, _ := nats.Connect(nc.ConnectedUrl())
 	t.Cleanup(func() { nc2.Close() })
 
-	nc2.Subscribe("llm.provider.openai", func(msg *nats.Msg) {
+	nc2.Subscribe("llm.provider.openai.>", func(msg *nats.Msg) {
 		errResp := api.ErrorResponse{
 			Error: api.APIError{Message: "model not found", Type: "error", Code: "model_not_found"},
 		}

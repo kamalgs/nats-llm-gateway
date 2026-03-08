@@ -193,7 +193,7 @@ func TestE2E_NATSDirectProviderRequest(t *testing.T) {
 	}
 	data, _ := json.Marshal(req)
 
-	msg, err := nc.Request("llm.provider.openai", data, 5*time.Second)
+	msg, err := nc.Request("llm.provider.openai.gpt-4o", data, 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}

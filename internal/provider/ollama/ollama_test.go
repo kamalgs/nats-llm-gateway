@@ -110,7 +110,7 @@ func TestAdapter_NATSSubscription(t *testing.T) {
 	}
 	data, _ := json.Marshal(provReq)
 
-	msg, err := nc.Request("llm.provider.ollama", data, 5e9)
+	msg, err := nc.Request("llm.provider.ollama.llama3-8b", data, 5e9)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestAdapter_NATSInvalidPayload(t *testing.T) {
 	}
 	defer sub.Drain()
 
-	msg, err := nc.Request("llm.provider.ollama", []byte("{bad json"), 5e9)
+	msg, err := nc.Request("llm.provider.ollama.llama3-8b", []byte("{bad json"), 5e9)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}

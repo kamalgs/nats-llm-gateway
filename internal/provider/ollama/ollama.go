@@ -92,7 +92,7 @@ func (a *Adapter) ChatCompletion(ctx context.Context, req *api.ProviderRequest) 
 
 // Subscribe registers this adapter as a NATS subscriber on llm.provider.ollama.
 func (a *Adapter) Subscribe(nc *nats.Conn) (*nats.Subscription, error) {
-	subject := "llm.provider." + a.Name()
+	subject := "llm.provider." + a.Name() + ".>"
 	sub, err := nc.QueueSubscribe(subject, QueueGroup, func(msg *nats.Msg) {
 		a.handleMessage(msg)
 	})

@@ -111,7 +111,7 @@ func BenchmarkNATSRequestReply(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		msg, err := s.nc.Request("llm.provider.openai", provData, 10*time.Second)
+		msg, err := s.nc.Request("llm.provider.openai.bench-model", provData, 10*time.Second)
 		if err != nil {
 			b.Fatalf("request: %v", err)
 		}
@@ -145,7 +145,7 @@ func BenchmarkNATSRequestReplyParallel(b *testing.B) {
 		defer nc2.Close()
 
 		for pb.Next() {
-			msg, err := nc2.Request("llm.provider.openai", provData, 10*time.Second)
+			msg, err := nc2.Request("llm.provider.openai.bench-model", provData, 10*time.Second)
 			if err != nil {
 				b.Fatalf("request: %v", err)
 			}

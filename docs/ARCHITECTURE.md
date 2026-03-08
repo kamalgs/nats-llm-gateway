@@ -46,7 +46,7 @@ the provider, so the proxy publishes directly to the right NATS subject.
 
 **NATS interaction:**
 ```
-Publishes to:  llm.provider.<provider>  (request-reply)
+Publishes to:  llm.provider.<provider>.<model>  (request-reply)
 ```
 
 **Why it exists:** So existing OpenAI SDKs and `curl` work unchanged — just
@@ -68,10 +68,15 @@ Each provider is a NATS queue subscriber that:
 
 **NATS interaction (per provider):**
 ```
-openai:    subscribes to llm.provider.openai     (queue: "provider-openai")
-anthropic: subscribes to llm.provider.anthropic  (queue: "provider-anthropic")
-ollama:    subscribes to llm.provider.ollama     (queue: "provider-ollama")
+openai:    subscribes to llm.provider.openai.>     (queue: "provider-openai")
+anthropic: subscribes to llm.provider.anthropic.>  (queue: "provider-anthropic")
+ollama:    subscribes to llm.provider.ollama.>     (queue: "provider-ollama")
 ```
+
+The `>` wildcard matches all models for that provider. A provider can also
+subscribe to a specific model subject (e.g., `llm.provider.openai.gpt-4o`)
+to handle only that model — useful for dedicated capacity or model-specific
+routing.
 
 **What each adapter does differently:**
 
@@ -122,7 +127,7 @@ curl POST /v1/chat/completions
 │          │  → provider: "anthropic"
 │          │  → upstream: "claude-sonnet-4-20250514"
 └────┬─────┘
-     │  NATS publish: "llm.provider.anthropic"
+     │  NATS publish: "llm.provider.anthropic.claude-sonnet-4-20250514"
      │  payload: ProviderRequest{UpstreamModel: "claude-sonnet-4-20250514", ...}
      ▼
 ┌──────────┐
@@ -162,8 +167,8 @@ config files, no Go code.
 ```
 
 **What leaf nodes do:** Transparently extend the NATS subject space across
-geographic regions. When the proxy publishes `llm.provider.openai` on the
-client leaf, NATS automatically routes it to whichever leaf has a subscriber.
+geographic regions. When the proxy publishes `llm.provider.openai.gpt-4o` on the client leaf,
+NATS automatically routes it to whichever leaf has a matching subscriber.
 
 **What leaf nodes DON'T do:** No application logic. No model resolution. No
 request transformation. They're NATS servers with a `leafnodes.remotes` config.
@@ -250,11 +255,14 @@ No coordination needed. NATS handles it.
 
 ## NATS Subjects Reference
 
-| Subject                    | Publisher | Subscriber        | Payload          |
-|----------------------------|-----------|-------------------|------------------|
-| `llm.provider.openai`      | Proxy/SDK | OpenAI adapter    | `ProviderRequest`|
-| `llm.provider.anthropic`   | Proxy/SDK | Anthropic adapter | `ProviderRequest`|
-| `llm.provider.ollama`      | Proxy/SDK | Ollama adapter    | `ProviderRequest`|
+| Subject pattern                         | Publisher | Subscriber        | Payload          |
+|-----------------------------------------|-----------|-------------------|------------------|
+| `llm.provider.openai.<model>`           | Proxy/SDK | OpenAI adapter    | `ProviderRequest`|
+| `llm.provider.anthropic.<model>`        | Proxy/SDK | Anthropic adapter | `ProviderRequest`|
+| `llm.provider.ollama.<model>`           | Proxy/SDK | Ollama adapter    | `ProviderRequest`|
+
+Providers subscribe with `>` wildcard (e.g., `llm.provider.openai.>`) to
+handle all models, or to a specific subject for dedicated model handling.
 
 All use NATS request-reply pattern. Replies carry `ChatResponse` or
 `ErrorResponse`.

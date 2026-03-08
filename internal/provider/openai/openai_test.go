@@ -142,7 +142,7 @@ func TestAdapter_NATSSubscription(t *testing.T) {
 	}
 	data, _ := json.Marshal(provReq)
 
-	msg, err := nc.Request("llm.provider.openai", data, 5e9)
+	msg, err := nc.Request("llm.provider.openai.gpt-4o-test", data, 5e9)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestAdapter_NATSInvalidPayload(t *testing.T) {
 	}
 	defer sub.Drain()
 
-	msg, err := nc.Request("llm.provider.openai", []byte("{bad json"), 5e9)
+	msg, err := nc.Request("llm.provider.openai.gpt-4o-test", []byte("{bad json"), 5e9)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestAdapter_MultipleSubscribers(t *testing.T) {
 	data, _ := json.Marshal(provReq)
 
 	for i := 0; i < 10; i++ {
-		msg, err := nc.Request("llm.provider.openai", data, 5e9)
+		msg, err := nc.Request("llm.provider.openai.gpt-4o-test", data, 5e9)
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}

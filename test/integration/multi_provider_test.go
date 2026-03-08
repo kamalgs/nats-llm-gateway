@@ -128,12 +128,12 @@ func TestMultiProvider_Routing(t *testing.T) {
 		provider      string
 		subject       string
 	}{
-		{"gpt-4o", "openai", "llm.provider.openai"},
-		{"gpt-4o-mini", "openai", "llm.provider.openai"},
-		{"claude-sonnet-4-20250514", "anthropic", "llm.provider.anthropic"},
-		{"claude-haiku-4-5-20251001", "anthropic", "llm.provider.anthropic"},
-		{"llama3:8b", "ollama", "llm.provider.ollama"},
-		{"mistral:7b", "ollama", "llm.provider.ollama"},
+		{"gpt-4o", "openai", "llm.provider.openai.gpt-4o"},
+		{"gpt-4o-mini", "openai", "llm.provider.openai.gpt-4o-mini"},
+		{"claude-sonnet-4-20250514", "anthropic", "llm.provider.anthropic.claude-sonnet-4-20250514"},
+		{"claude-haiku-4-5-20251001", "anthropic", "llm.provider.anthropic.claude-haiku-4-5-20251001"},
+		{"llama3:8b", "ollama", "llm.provider.ollama.llama3:8b"},
+		{"mistral:7b", "ollama", "llm.provider.ollama.mistral:7b"},
 	}
 
 	for _, tt := range tests {
@@ -199,9 +199,9 @@ func TestMultiProvider_UnifiedResponseFormat(t *testing.T) {
 		subject string
 		model   string
 	}{
-		{"llm.provider.openai", "gpt-4o"},
-		{"llm.provider.anthropic", "claude-sonnet-4-20250514"},
-		{"llm.provider.ollama", "llama3:8b"},
+		{"llm.provider.openai.gpt-4o", "gpt-4o"},
+		{"llm.provider.anthropic.claude-sonnet-4-20250514", "claude-sonnet-4-20250514"},
+		{"llm.provider.ollama.llama3:8b", "llama3:8b"},
 	}
 
 	for _, s := range subjects {

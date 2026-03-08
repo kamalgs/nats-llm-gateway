@@ -90,7 +90,7 @@ func (p *Proxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subject := "llm.provider." + provider
+	subject := "llm.provider." + provider + "." + upstream
 	p.log.Info("proxying request", "provider", provider, "upstream_model", upstream, "subject", subject)
 
 	msg, err := p.nc.Request(subject, data, RequestTimeout)

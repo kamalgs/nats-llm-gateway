@@ -1,6 +1,7 @@
 # Binaries
-/gateway
 /proxy
+/provider
+/mockllm
 *.exe
 *.dll
 *.so
@@ -26,8 +27,8 @@ vendor/
 Thumbs.db
 
 # Config with secrets
-configs/gateway.yaml
-!configs/gateway.yaml.example
+configs/provider.yaml
+!configs/provider.yaml.example
 
 # JS SDK
 sdk/js/node_modules/
