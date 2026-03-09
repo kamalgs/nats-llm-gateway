@@ -1,5 +1,5 @@
 services:
-  # === NATS Infrastructure ===
+  # === NATS Hub (central router) ===
 
   nats-hub:
     image: nats:2-alpine
@@ -12,6 +12,8 @@ services:
       timeout: 2s
       retries: 10
 
+  # === Client-side NATS leaf (SDK connects here) ===
+
   nats-leaf-client:
     image: nats:2-alpine
     ports:
@@ -23,51 +25,18 @@ services:
       nats-hub:
         condition: service_healthy
 
-  nats-leaf-edge:
-    image: nats:2-alpine
-    volumes:
-      - ./nats-leaf-edge.conf:/etc/nats/nats.conf
-    command: ["--config", "/etc/nats/nats.conf"]
-    depends_on:
-      nats-hub:
-        condition: service_healthy
+  # === Edge node: Ollama + NATS leaf + provider (sidecar) ===
 
-  # === LLM Backend (Ollama on CPU) ===
-
-  llm:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama-models:/root/.ollama
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        ollama serve &
-        while ! ollama list >/dev/null 2>&1; do sleep 1; done
-        ollama pull qwen2.5:0.5b
-        wait
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q qwen2.5"]
-      interval: 5s
-      timeout: 3s
-      retries: 60
-      start_period: 5s
-
-  # === Application Services ===
-
-  provider-ollama:
+  edge-node:
     build:
       context: ..
-      dockerfile: demo/Dockerfile
-    entrypoint: ["provider"]
+      dockerfile: demo/Dockerfile.edge
     environment:
-      PROVIDER_NAME: ollama
-      PROVIDER_CONFIG: /etc/infermesh/demo.yaml
-      NATS_URL: "nats://nats-leaf-edge:4224"
-      OLLAMA_BASE_URL: "http://llm:11434"
+      MODEL: "qwen2.5:0.5b"
+    volumes:
+      - ollama-models:/root/.ollama
     depends_on:
-      nats-leaf-edge:
-        condition: service_started
-      llm:
+      nats-hub:
         condition: service_healthy
 
 volumes:

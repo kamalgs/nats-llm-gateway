@@ -1,0 +1,27 @@
+# Sidecar container: Ollama + NATS leaf node + provider adapter
+# All three processes run in a single container communicating over
+# Unix socket (Ollama) and localhost (NATS leaf).
+
+# --- Stage 1: Build the provider binary ---
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /bin/provider ./cmd/provider
+
+# --- Stage 2: Runtime ---
+FROM ollama/ollama:latest
+
+# Install NATS server
+COPY --from=nats:2-alpine /usr/local/bin/nats-server /usr/local/bin/nats-server
+
+# Copy provider binary and config
+COPY --from=builder /bin/provider /usr/local/bin/provider
+COPY demo/demo.yaml /etc/infermesh/demo.yaml
+COPY demo/nats-leaf-edge.conf /etc/nats/leaf.conf
+COPY demo/edge-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

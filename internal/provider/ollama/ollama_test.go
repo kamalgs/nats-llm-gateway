@@ -203,3 +203,4 @@ func TestAdapter_LongTimeout(t *testing.T) {
 		t.Errorf("timeout: got %v, want 120s", adapter.client.Timeout)
 	}
 }
+
