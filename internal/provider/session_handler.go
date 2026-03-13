@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 const SessionTTL = 30 * time.Minute
 
 // SessionHandler wraps a Provider with session management.
-// It handles NATS message dispatch, session creation, and session-based messaging.
 type SessionHandler struct {
 	adapter  Provider
 	sessions *session.Store
@@ -31,17 +31,35 @@ func NewSessionHandler(adapter Provider, nc *nats.Conn, log *slog.Logger) *Sessi
 	}
 }
 
-// Subscribe registers the provider on its standard subject with session support.
-func (sh *SessionHandler) Subscribe(queueGroup string) (*nats.Subscription, error) {
-	subject := "llm.provider." + sh.adapter.Name() + ".>"
-	sub, err := sh.nc.QueueSubscribe(subject, queueGroup, func(msg *nats.Msg) {
-		sh.handleProviderMessage(msg)
-	})
-	if err != nil {
-		return nil, err
+// Subscribe registers the provider on llm.chat.{model} subjects.
+// If models is empty, subscribes to llm.chat.> (all models).
+// If models is provided, subscribes to llm.chat.{model} for each model.
+// Returns the subscriptions (caller should defer Drain on each).
+func (sh *SessionHandler) Subscribe(queueGroup string, models ...string) ([]*nats.Subscription, error) {
+	var subs []*nats.Subscription
+
+	suffixes := []string{">"}
+	if len(models) > 0 {
+		suffixes = make([]string, len(models))
+		copy(suffixes, models)
 	}
-	sh.log.Info("provider adapter listening", "subject", subject, "queue", queueGroup)
-	return sub, nil
+
+	for _, suffix := range suffixes {
+		subject := "llm.chat." + suffix
+		sub, err := sh.nc.QueueSubscribe(subject, queueGroup, func(msg *nats.Msg) {
+			sh.handleProviderMessage(msg)
+		})
+		if err != nil {
+			for _, s := range subs {
+				s.Drain()
+			}
+			return nil, fmt.Errorf("subscribe %s: %w", subject, err)
+		}
+		subs = append(subs, sub)
+		sh.log.Info("provider adapter listening", "subject", subject, "queue", queueGroup)
+	}
+
+	return subs, nil
 }
 
 func (sh *SessionHandler) Close() {
@@ -49,7 +67,6 @@ func (sh *SessionHandler) Close() {
 }
 
 // handleProviderMessage handles requests on the standard provider subject.
-// Creates a new session and returns session info in the response.
 func (sh *SessionHandler) handleProviderMessage(msg *nats.Msg) {
 	var req api.ProviderRequest
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
@@ -57,13 +74,18 @@ func (sh *SessionHandler) handleProviderMessage(msg *nats.Msg) {
 		return
 	}
 
+	sh.log.Info("provider request",
+		"model", req.UpstreamModel,
+		"messages", len(req.Request.Messages),
+	)
+
 	resp, err := sh.adapter.ChatCompletion(context.Background(), &req)
 	if err != nil {
 		sh.replyError(msg, "provider_error", err.Error())
 		return
 	}
 
-	// Build session context: original messages + assistant reply
+	// Build session context.
 	allMessages := make([]api.Message, len(req.Request.Messages))
 	copy(allMessages, req.Request.Messages)
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
@@ -72,7 +94,7 @@ func (sh *SessionHandler) handleProviderMessage(msg *nats.Msg) {
 
 	sess := sh.sessions.Create(req.UpstreamModel, allMessages)
 
-	// Subscribe to session subject for subsequent messages
+	// Subscribe to session subject for subsequent messages.
 	sessionSubject := "llm.session." + sess.ID
 	sessSub, err := sh.nc.Subscribe(sessionSubject, func(m *nats.Msg) {
 		sh.handleSessionMessage(sess.ID, m)
@@ -90,7 +112,6 @@ func (sh *SessionHandler) handleProviderMessage(msg *nats.Msg) {
 }
 
 // handleSessionMessage handles requests on a session-specific subject.
-// Appends new message(s) to the session context and sends full context to the model.
 func (sh *SessionHandler) handleSessionMessage(sessionID string, msg *nats.Msg) {
 	sess, ok := sh.sessions.Get(sessionID)
 	if !ok {
@@ -109,13 +130,27 @@ func (sh *SessionHandler) handleSessionMessage(sessionID string, msg *nats.Msg) 
 		return
 	}
 
-	// Append new messages from client to session
+	// Reject system messages in delta continuation requests.
+	for _, m := range req.Request.Messages {
+		if m.Role == "system" {
+			sh.replyError(msg, "invalid_request", "system messages are not allowed in session continuation requests")
+			return
+		}
+	}
+
+	sh.log.Info("session request",
+		"session_id", sessionID,
+		"new_messages", len(req.Request.Messages),
+		"stored_messages", len(sess.Messages),
+	)
+
+	// Append new messages from client to session.
 	sh.sessions.Append(sessionID, req.Request.Messages...)
 
-	// Refresh session reference after append
+	// Refresh session reference after append.
 	sess, _ = sh.sessions.Get(sessionID)
 
-	// Build full-context request for upstream
+	// Build full-context request for upstream.
 	fullReq := &api.ProviderRequest{
 		UpstreamModel: req.UpstreamModel,
 		Request: api.ChatRequest{
@@ -132,7 +167,7 @@ func (sh *SessionHandler) handleSessionMessage(sessionID string, msg *nats.Msg) 
 		return
 	}
 
-	// Append assistant reply to session
+	// Append assistant reply to session.
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		sh.sessions.Append(sessionID, *resp.Choices[0].Message)
 	}

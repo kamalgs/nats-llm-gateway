@@ -59,7 +59,7 @@ The gateway adds:
 | **Multi-region clustering** | NATS superclusters span data centers; subjects route globally |
 | **Leaf nodes** | On-prem GPU clusters connect to the global mesh via outbound leaf node connections — no public IPs, no VPNs |
 | **Queue groups** | Automatic load distribution across inference nodes, zero configuration |
-| **Subject hierarchy** | `llm.provider.<name>.<region>` enables geographic routing at the subject level |
+| **Subject hierarchy** | `llm.chat.{model}` enables geographic routing at the subject level |
 | **Latency-aware routing** | NATS routes to the topologically nearest subscriber by default |
 | **Account isolation** | Built-in multi-tenancy with NATS accounts and JWTs |
 | **JetStream** | Persistent queues for backpressure when GPUs are saturated |
@@ -101,7 +101,7 @@ The OpenAI-compatible API makes adoption frictionless:
 | ID | Requirement | Priority |
 |----|-------------|----------|
 | FR-1 | Gateway routes requests to inference nodes based on model + region | P0 |
-| FR-2 | Geographic subject hierarchy: `llm.provider.<name>.<region>` | P0 |
+| FR-2 | Geographic subject hierarchy: `llm.chat.{model}` | P0 |
 | FR-3 | Dynamic load shifting — move traffic between regions based on capacity signals | P0 |
 | FR-4 | Inference node health reporting — GPU utilization, queue depth, latency published to status subjects | P0 |
 | FR-5 | Region failover — if a region's inference nodes are unavailable, route to next-best region | P0 |
@@ -322,7 +322,7 @@ JS SDK                        Gateway Service              Provider Adapter
     │                              │  Resolve model → provider    │
     │                              │                              │
     │                              │  NATS Request                │
-    │                              │  subject: llm.provider.openai│
+    │                              │  subject: llm.chat.*│
     │                              │ ────────────────────────────►│
     │                              │                              │  HTTP call to
     │                              │                              │  OpenAI API
@@ -347,7 +347,7 @@ JS SDK                        Gateway Service              Provider Adapter
     │                              │  Resolve model → provider    │
     │                              │                              │
     │                              │  NATS Request                │
-    │                              │  subject: llm.provider.openai│
+    │                              │  subject: llm.chat.*│
     │                              │  stream_reply:               │
     │                              │   _INBOX.stream.xxx          │
     │                              │ ────────────────────────────►│
@@ -374,12 +374,12 @@ request (auth, rate limit, routing).
 | `llm.chat.complete` | Non-streaming chat completion requests | Request/Reply |
 | `llm.chat.stream` | Streaming chat completion requests | Request triggers pub/sub |
 | `llm.models` | List available models | Request/Reply |
-| `llm.provider.<name>` | Internal: gateway → provider adapter | Request/Reply + queue group |
+| `llm.chat.{model}` | Internal: gateway → provider adapter | Request/Reply + queue group |
 | `llm.admin.reload` | Config hot-reload signal | Pub/Sub |
 
 - The gateway service subscribes to `llm.chat.complete` and `llm.chat.stream`
   using **queue groups** for horizontal scaling.
-- Provider adapters subscribe to `llm.provider.<name>` using **queue groups**
+- Provider adapters subscribe to `llm.chat.{model}` using **queue groups**
   so multiple replicas share load.
 - Streaming chunks flow directly from adapter to client inbox — no gateway hop.
 
@@ -508,7 +508,7 @@ providers:
 
 ### 4.10 NATS-Native Inference (HTTP at the Edge Only)
 
-The same NATS subject contract (`llm.provider.<name>`) works for both
+The same NATS subject contract (`llm.chat.{model}`) works for both
 cloud API adapters (which bridge NATS→HTTP outbound) and self-hosted
 inference servers (which subscribe to NATS directly). This means HTTP
 can be eliminated from the entire path except at the client edge.
@@ -539,7 +539,7 @@ Browser (NATS WS) ──► NATS ──► Gateway ──► NATS ──► Mode
 #### NATS-Native Model Server
 
 A NATS-native model server is a thin wrapper around an inference engine
-(vLLM, Ollama, llama.cpp, TGI) that subscribes to `llm.provider.<name>`
+(vLLM, Ollama, llama.cpp, TGI) that subscribes to `llm.chat.{model}`
 and runs inference directly — no HTTP server in the inference process.
 
 ```
@@ -547,7 +547,7 @@ and runs inference directly — no HTTP server in the inference process.
 │         NATS-Native Model Server     │
 │                                      │
 │  NATS subscriber                     │
-│  subject: llm.provider.local-llama   │
+│  subject: llm.chat.local-llama   │
 │  queue group: inference              │
 │                                      │
 │  ┌──────────────────────────────┐    │
@@ -652,7 +652,7 @@ Synadia Cloud's account model maps naturally to LLM gateway tenancy:
 ```
 Operator (you)
 ├── Account: "team-alpha"     (JWT-authenticated)
-│   ├── User: "alpha-app-1"  → can publish to llm.chat.*, llm.provider.openai
+│   ├── User: "alpha-app-1"  → can publish to llm.chat.*, llm.chat.*
 │   ├── User: "alpha-app-2"  → can publish to llm.chat.* only
 │   └── Rate limit: 1000 msg/min
 │
@@ -661,9 +661,9 @@ Operator (you)
 │   └── Rate limit: 500 msg/min
 │
 └── Account: "infra"          (internal)
-    ├── User: "gateway-svc"   → subscribes to llm.chat.*, publishes to llm.provider.*
-    ├── User: "openai-adapter"→ subscribes to llm.provider.openai
-    └── User: "gpu-node-1"   → subscribes to llm.provider.local-llama
+    ├── User: "gateway-svc"   → subscribes to llm.chat.*, publishes to llm.*
+    ├── User: "openai-adapter"→ subscribes to llm.chat.*
+    └── User: "gpu-node-1"   → subscribes to llm.chat.local-llama
 ```
 
 Each account is fully isolated — `team-alpha` cannot see `team-beta`'s
@@ -767,7 +767,7 @@ global deployment.
 - [ ] Mixed deployment: local Ollama (NATS-native) + cloud OpenAI (HTTP adapter)
 
 ### M3 — Geographic Routing
-- [ ] Geographic subject hierarchy: `llm.provider.<name>.<region>`
+- [ ] Geographic subject hierarchy: `llm.chat.{model}`
 - [ ] Inference node registration: nodes announce region, models, and capacity on connect
 - [ ] Region-aware routing: gateway routes to the nearest region with available capacity
 - [ ] Multi-region NATS cluster setup (3-node example across regions)

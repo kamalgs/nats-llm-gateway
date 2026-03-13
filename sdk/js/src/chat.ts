@@ -15,16 +15,6 @@ interface ProviderRequest {
   request: ChatCompletionRequest;
 }
 
-function parseModel(model: string): { provider: string; upstream: string } {
-  const i = model.indexOf(".");
-  if (i <= 0 || i === model.length - 1) {
-    throw new Error(
-      `model "${model}" must be in the form provider.model (e.g., ollama.qwen2.5:0.5b)`
-    );
-  }
-  return { provider: model.slice(0, i), upstream: model.slice(i + 1) };
-}
-
 export interface ChatCompletionResult {
   response: ChatCompletionResponse;
   bytesSent: number;
@@ -50,10 +40,8 @@ export class ChatCompletions {
     subject: string,
     req: ChatCompletionRequest,
   ): Promise<ChatCompletionResult> {
-    const { upstream } = parseModel(req.model);
-
     const providerReq: ProviderRequest = {
-      upstream_model: upstream,
+      upstream_model: req.model,
       request: req,
     };
 
@@ -61,11 +49,10 @@ export class ChatCompletions {
   }
 
   private async _send(req: ChatCompletionRequest): Promise<ChatCompletionResult> {
-    const { provider, upstream } = parseModel(req.model);
-    const subject = `llm.provider.${provider}.${upstream}`;
+    const subject = `llm.chat.${req.model}`;
 
     const providerReq: ProviderRequest = {
-      upstream_model: upstream,
+      upstream_model: req.model,
       request: req,
     };
 
@@ -85,7 +72,12 @@ export class ChatCompletions {
 
     for await (const msg of sub) {
       const bytesReceived = msg.data.length;
-      const data = JSON.parse(sc.decode(msg.data));
+      let data: any;
+      try {
+        data = JSON.parse(sc.decode(msg.data));
+      } catch {
+        throw new Error("no response received");
+      }
 
       if (data.error) {
         const err = data as ErrorResponse;
@@ -103,10 +95,14 @@ export class ChatCompletions {
   }
 }
 
+export interface ChatSessionOptions {
+  debug?: boolean;
+}
+
 /**
  * ChatSession maintains a sticky session with a provider.
- * The provider keeps the conversation context; the client sends only new messages.
- * If the session expires, falls back to sending full history.
+ * Sends only new (delta) messages on subsequent turns — the server
+ * accumulates full history via the session subject.
  */
 export class ChatSession {
   private sessionId: string | null = null;
@@ -114,58 +110,71 @@ export class ChatSession {
   private history: Message[] = [];
   private completions: ChatCompletions;
   private model: string;
+  private debug: boolean;
 
-  constructor(completions: ChatCompletions, model: string) {
+  constructor(completions: ChatCompletions, model: string, opts?: ChatSessionOptions) {
     this.completions = completions;
     this.model = model;
+    this.debug = opts?.debug ?? false;
+  }
+
+  private log(...args: unknown[]): void {
+    if (this.debug) console.log("[ChatSession]", ...args);
   }
 
   async send(
     content: string,
     opts?: { temperature?: number; max_tokens?: number },
   ): Promise<ChatCompletionResult> {
-    const userMsg: Message = { role: "user", content };
-    this.history.push(userMsg);
+    this.history.push({ role: "user", content });
+
+    this.log(`send: "${content.slice(0, 80)}${content.length > 80 ? "..." : ""}"`);
 
     try {
       let result: ChatCompletionResult;
 
+      const reqBase: Partial<ChatCompletionRequest> = {
+        model: this.model,
+        ...opts,
+      };
+
       if (this.sessionId && this.sessionSubject) {
-        // Session mode: send only the new message
+        // Session mode: send only the new message (delta).
         try {
           result = await this.completions.sendToSubject(
             this.sessionSubject,
             {
-              model: this.model,
-              messages: [userMsg],
+              ...reqBase,
+              messages: [{ role: "user", content }],
               session_id: this.sessionId,
-              ...opts,
-            },
+            } as ChatCompletionRequest,
           );
         } catch (err: any) {
-          if (err.message.includes("session_expired")) {
-            // Session expired: reset and send full history
+          const isSessionError =
+            err.message.includes("session_expired") ||
+            err.message.includes("TIMEOUT") ||
+            err.message.includes("no response received");
+          if (isSessionError) {
+            this.log("session lost, falling back to full history");
             this.sessionId = null;
             this.sessionSubject = null;
             result = await this.completions.createWithStats({
-              model: this.model,
+              ...reqBase,
               messages: this.history,
-              ...opts,
-            });
+            } as ChatCompletionRequest);
           } else {
             throw err;
           }
         }
       } else {
-        // No session yet: send full history
+        // No session yet: send full history.
         result = await this.completions.createWithStats({
-          model: this.model,
+          ...reqBase,
           messages: this.history,
-          ...opts,
-        });
+        } as ChatCompletionRequest);
       }
 
-      // Track session from response
+      // Track session from response.
       if (result.response.session_id) {
         this.sessionId = result.response.session_id;
       }
@@ -173,10 +182,9 @@ export class ChatSession {
         this.sessionSubject = result.response.session_subject;
       }
 
-      // Keep local history in sync (for fallback)
-      const reply = result.response.choices[0]?.message;
-      if (reply) {
-        this.history.push(reply);
+      const replyMsg = result.response.choices[0]?.message;
+      if (replyMsg) {
+        this.history.push({ role: "assistant", content: replyMsg.content ?? "" });
       }
 
       return result;
@@ -208,7 +216,7 @@ export class Chat {
     this.completions = new ChatCompletions(nc);
   }
 
-  createSession(model: string): ChatSession {
-    return new ChatSession(this.completions, model);
+  createSession(model: string, opts?: ChatSessionOptions): ChatSession {
+    return new ChatSession(this.completions, model, opts);
   }
 }

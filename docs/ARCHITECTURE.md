@@ -3,9 +3,9 @@
 ## What InferMesh Does
 
 InferMesh is a unified LLM API. You send one HTTP request to one endpoint, and
-it routes to the right LLM provider (OpenAI, Anthropic, Ollama) based on the
-model name. Geographic distribution happens through NATS leaf nodes — pure
-infrastructure, no application code.
+it routes to the right LLM provider based on the model name. Geographic
+distribution happens through NATS leaf nodes — pure infrastructure, no
+application code.
 
 ## The Two Application Components
 
@@ -18,7 +18,7 @@ infrastructure.
 │                                                          │
 │   ┌───────────┐                       ┌──────────────┐   │
 │   │   Proxy   │───── NATS ──────────► │   Provider   │   │
-│   │  (HTTP →  │  llm.provider.<name>  │  (NATS →     │   │
+│   │  (HTTP →  │  llm.chat.{model}   │  (NATS →     │   │
 │   │   NATS)   │                       │   HTTP LLM)  │   │
 │   └───────────┘                       └──────────────┘   │
 │                                                          │
@@ -27,8 +27,8 @@ infrastructure.
 └──────────────────────────────────────────────────────────┘
 ```
 
-There is no router, orchestrator, or gateway code. The model name encodes
-the provider, so the proxy publishes directly to the right NATS subject.
+There is no router, orchestrator, or gateway code. The model name determines
+the NATS subject, so the proxy publishes directly.
 
 ---
 
@@ -38,19 +38,20 @@ the provider, so the proxy publishes directly to the right NATS subject.
 
 - Exposes `POST /v1/chat/completions` (OpenAI-compatible)
 - Exposes `GET /health`
-- Parses the model name using the `provider.model` convention
-  (e.g., `openai.gpt-4o` → provider `openai`, upstream model `gpt-4o`)
-- Publishes a `ProviderRequest` to NATS subject `llm.provider.<provider>`
+- Uses the model name directly (e.g., `gpt-4o`, `qwen2.5:0.5b`)
+- Publishes a `ProviderRequest` to NATS subject `llm.chat.{model}`
 - Waits for NATS reply, writes it back as HTTP response
 - Maps error codes to HTTP status codes (404, 429, 400, 500)
 
 **NATS interaction:**
 ```
-Publishes to:  llm.provider.<provider>.<model>  (request-reply)
+Publishes to:  llm.chat.{model}  (request-reply)
+Examples:      llm.chat.gpt-4o
+               llm.chat.qwen2.5:0.5b
 ```
 
 **Why it exists:** So existing OpenAI SDKs and `curl` work unchanged — just
-point `base_url` at the proxy and prefix model names with the provider.
+point `base_url` at the proxy.
 
 ---
 
@@ -59,7 +60,7 @@ point `base_url` at the proxy and prefix model names with the provider.
 **Responsibility:** NATS consumer that calls an upstream LLM API.
 
 Each provider is a NATS queue subscriber that:
-- Subscribes to `llm.provider.<name>` (e.g., `llm.provider.anthropic`)
+- Subscribes to `llm.chat.>` (all models) or `llm.chat.{model}` (specific model)
 - Receives a `ProviderRequest` from the proxy (or SDK)
 - Translates it into the provider's native HTTP API format
 - Calls the upstream LLM API over HTTP
@@ -68,15 +69,13 @@ Each provider is a NATS queue subscriber that:
 
 **NATS interaction (per provider):**
 ```
-openai:    subscribes to llm.provider.openai.>     (queue: "provider-openai")
-anthropic: subscribes to llm.provider.anthropic.>  (queue: "provider-anthropic")
-ollama:    subscribes to llm.provider.ollama.>     (queue: "provider-ollama")
+openai:    subscribes to llm.chat.>  (queue: "provider-openai")
+anthropic: subscribes to llm.chat.>  (queue: "provider-anthropic")
+ollama:    subscribes to llm.chat.>  (queue: "provider-ollama")
+llamacpp:  subscribes to llm.chat.>  (queue: "provider-llamacpp")
 ```
 
-The `>` wildcard matches all models for that provider. A provider can also
-subscribe to a specific model subject (e.g., `llm.provider.openai.gpt-4o`)
-to handle only that model — useful for dedicated capacity or model-specific
-routing.
+The `>` wildcard matches all models.
 
 **What each adapter does differently:**
 
@@ -85,6 +84,7 @@ routing.
 | OpenAI    | `{base}/chat/completions`  | `Authorization: Bearer` | No — native format | 60s |
 | Anthropic | `{base}/v1/messages`       | `x-api-key` + `anthropic-version` | Yes — system messages, max_tokens, response mapping | 60s |
 | Ollama    | `{base}/chat/completions`  | None                | No — OpenAI-compatible | 120s |
+| llama.cpp | `{base}/v1/chat/completions` | None              | No — OpenAI-compatible | 120s |
 
 **Anthropic translation details:**
 - Extracts `system` role messages → Anthropic `system` top-level field
@@ -95,21 +95,21 @@ routing.
 
 ---
 
-## Model Naming Convention
+## Model Naming
 
-Models are named `provider.model`. The part before the first dot is the
-provider, the rest is passed to the upstream API as-is.
+Models are named directly — no provider prefix needed. The model name is used
+as-is in the NATS subject and passed to the upstream API.
 
 ```
-openai.gpt-4o                      → provider: openai,    model: gpt-4o
-openai.gpt-4o-mini                 → provider: openai,    model: gpt-4o-mini
-anthropic.claude-sonnet-4-20250514 → provider: anthropic, model: claude-sonnet-4-20250514
-ollama.llama3:8b                   → provider: ollama,    model: llama3:8b
+gpt-4o                      → subject: llm.chat.gpt-4o
+claude-sonnet-4-20250514    → subject: llm.chat.claude-sonnet-4-20250514
+qwen2.5:0.5b               → subject: llm.chat.qwen2.5:0.5b
+llama3:8b                   → subject: llm.chat.llama3:8b
 ```
 
 This means:
 - No routing table needed. The model name IS the routing key.
-- Clients know exactly which provider they're hitting.
+- Providers subscribe with `>` wildcard to handle all models.
 - Adding a new provider is just deploying a new adapter — no config changes
   anywhere else.
 
@@ -119,15 +119,14 @@ This means:
 
 ```
 curl POST /v1/chat/completions
-     {model: "anthropic.claude-sonnet-4-20250514", messages: [...]}
+     {model: "claude-sonnet-4-20250514", messages: [...]}
   │
   ▼
 ┌──────────┐  HTTP
-│  Proxy   │  Parses "anthropic.claude-sonnet-4-20250514"
-│          │  → provider: "anthropic"
-│          │  → upstream: "claude-sonnet-4-20250514"
+│  Proxy   │  model: "claude-sonnet-4-20250514"
+│          │  → subject: "llm.chat.claude-sonnet-4-20250514"
 └────┬─────┘
-     │  NATS publish: "llm.provider.anthropic.claude-sonnet-4-20250514"
+     │  NATS publish: "llm.chat.claude-sonnet-4-20250514"
      │  payload: ProviderRequest{UpstreamModel: "claude-sonnet-4-20250514", ...}
      ▼
 ┌──────────┐
@@ -167,7 +166,7 @@ config files, no Go code.
 ```
 
 **What leaf nodes do:** Transparently extend the NATS subject space across
-geographic regions. When the proxy publishes `llm.provider.openai.gpt-4o` on the client leaf,
+geographic regions. When the proxy publishes `llm.chat.gpt-4o` on the client leaf,
 NATS automatically routes it to whichever leaf has a matching subscriber.
 
 **What leaf nodes DON'T do:** No application logic. No model resolution. No
@@ -190,17 +189,27 @@ cmd/                          # Entrypoints — thin main() wrappers
 └── mockllm/main.go           #   Starts the mock LLM server for testing
 
 internal/                     # Core logic — libraries used by cmd/
-├── proxy/proxy.go            #   HTTP server, model name parsing, NATS publishing
+├── proxy/proxy.go            #   HTTP server, NATS publishing
 ├── provider/
 │   ├── provider.go           #   Provider interface definition
+│   ├── session_handler.go    #   Session management
 │   ├── openai/openai.go      #   OpenAI adapter
 │   ├── anthropic/anthropic.go#   Anthropic adapter (with format translation)
-│   └── ollama/ollama.go      #   Ollama adapter
+│   ├── ollama/ollama.go      #   Ollama adapter
+│   └── llamacpp/llamacpp.go  #   llama.cpp adapter
 ├── config/config.go          #   YAML config loader
+├── session/store.go          #   Session store with TTL
 └── testutil/nats.go          #   Embedded NATS server for tests
 
 api/                          # Wire format types shared by all components
 └── types.go                  #   ChatRequest, ChatResponse, ProviderRequest, etc.
+
+sdk/js/                       # TypeScript/JavaScript client SDK
+├── src/
+│   ├── index.ts              #   InferMeshClient entry point
+│   ├── chat.ts               #   ChatCompletions + ChatSession classes
+│   └── types.ts              #   Wire format types
+└── test/                     #   Vitest tests
 ```
 
 **Why `cmd/` vs `internal/`?** Standard Go project layout:
@@ -243,8 +252,8 @@ Environment variables are expanded at load time (`${VAR}` syntax).
 
 Because providers use NATS queue groups, you scale by running more instances:
 
-- **Multiple proxies:** All connect to NATS, all parse model names the same
-  way. Put them behind a load balancer.
+- **Multiple proxies:** All connect to NATS, all route by model name.
+  Put them behind a load balancer.
 - **Multiple providers:** Queue group `"provider-openai"` distributes requests
   across OpenAI adapter instances. Run 5 instances to handle 5 concurrent
   OpenAI requests.
@@ -255,14 +264,13 @@ No coordination needed. NATS handles it.
 
 ## NATS Subjects Reference
 
-| Subject pattern                         | Publisher | Subscriber        | Payload          |
-|-----------------------------------------|-----------|-------------------|------------------|
-| `llm.provider.openai.<model>`           | Proxy/SDK | OpenAI adapter    | `ProviderRequest`|
-| `llm.provider.anthropic.<model>`        | Proxy/SDK | Anthropic adapter | `ProviderRequest`|
-| `llm.provider.ollama.<model>`           | Proxy/SDK | Ollama adapter    | `ProviderRequest`|
+| Subject pattern                  | Publisher | Subscriber           | Payload          |
+|----------------------------------|-----------|----------------------|------------------|
+| `llm.chat.{model}`              | Proxy/SDK | Provider adapters    | `ProviderRequest`|
+| `llm.session.{session_id}`      | SDK       | Session owner provider | `ProviderRequest`|
 
-Providers subscribe with `>` wildcard (e.g., `llm.provider.openai.>`) to
-handle all models, or to a specific subject for dedicated model handling.
+Providers subscribe with `>` wildcard (e.g., `llm.chat.>`) to handle all
+models.
 
 All use NATS request-reply pattern. Replies carry `ChatResponse` or
 `ErrorResponse`.
